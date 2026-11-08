@@ -49,10 +49,10 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  // Controllers for Connection Settings
-  final _hostController = TextEditingController(text: '100.103.180.37');
+  // Controllers for Connection Settings (allowing any user, host, and port)
+  final _hostController = TextEditingController();
   final _portController = TextEditingController(text: '8022');
-  final _userController = TextEditingController(text: 'uo_a12');
+  final _userController = TextEditingController();
   final _passwordController = TextEditingController();
 
   // Controllers for Command Execution
@@ -86,9 +86,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> _loadSavedCredentials() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _hostController.text = prefs.getString('ssh_host') ?? '100.103.180.37';
+      _hostController.text = prefs.getString('ssh_host') ?? '';
       _portController.text = prefs.getString('ssh_port') ?? '8022';
-      _userController.text = prefs.getString('ssh_user') ?? 'uo_a12';
+      _userController.text = prefs.getString('ssh_user') ?? '';
     });
     
     final savedPassword = await _secureStorage.read(key: 'ssh_password');
@@ -125,6 +125,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Future<void> _connect() async {
     if (_isConnecting) return;
+
+    final host = _hostController.text.trim();
+    final port = int.tryParse(_portController.text.trim()) ?? 8022;
+    final username = _userController.text.trim();
+    final password = _passwordController.text;
+
+    if (host.isEmpty) {
+      _addLog('ERROR: Please enter a valid SSH host or Tailscale IP.', color: Colors.redAccent);
+      return;
+    }
+
+    if (username.isEmpty) {
+      _addLog('ERROR: Please enter an SSH username.', color: Colors.redAccent);
+      return;
+    }
     
     setState(() {
       _isConnecting = true;
@@ -132,12 +147,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     await _saveCredentials();
 
-    final host = _hostController.text.trim();
-    final port = int.tryParse(_portController.text.trim()) ?? 8022;
-    final username = _userController.text.trim();
-    final password = _passwordController.text;
-
-    _addLog('Connecting to $username@$host:$port over Tailscale...', color: Colors.yellowAccent);
+    _addLog('Connecting to $username@$host:$port over SSH / Tailscale...', color: Colors.yellowAccent);
 
     try {
       final socket = await SSHSocket.connect(
@@ -160,7 +170,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _isConnecting = false;
       });
 
-      _addLog('SUCCESS: Connected and authenticated to Termux SSH bridge!', color: Colors.greenAccent);
+      _addLog('SUCCESS: Connected and authenticated to $username@$host:$port!', color: Colors.greenAccent);
       
       // Run initial Greeting command
       _executeCommand('uname -a && uptime');
@@ -182,7 +192,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _client = null;
       _isConnected = false;
     });
-    _addLog('Disconnected from Termux SSH bridge.', color: Colors.orangeAccent);
+    _addLog('Disconnected from SSH server.', color: Colors.orangeAccent);
   }
 
   Future<void> _executeCommand(String commandStr) async {
@@ -301,7 +311,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Tailscale SSH Configuration',
+              'SSH & Tailscale Connection',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF38BDF8)),
             ),
             const SizedBox(height: 12),
@@ -312,7 +322,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   child: TextField(
                     controller: _hostController,
                     decoration: const InputDecoration(
-                      labelText: 'Tailscale IP',
+                      labelText: 'Host / Tailscale IP',
+                      hintText: 'e.g. 100.x.x.x',
                       border: OutlineInputBorder(),
                       prefixIcon: Icon(Icons.network_ping),
                       isDense: true,
@@ -326,6 +337,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     controller: _portController,
                     decoration: const InputDecoration(
                       labelText: 'Port',
+                      hintText: '8022',
                       border: OutlineInputBorder(),
                       isDense: true,
                     ),
@@ -342,6 +354,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     controller: _userController,
                     decoration: const InputDecoration(
                       labelText: 'SSH Username',
+                      hintText: 'e.g. u0_a123',
                       border: OutlineInputBorder(),
                       prefixIcon: Icon(Icons.person),
                       isDense: true,
@@ -372,8 +385,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     : (_isConnected ? _disconnect : _connect),
                 icon: Icon(_isConnected ? Icons.logout : Icons.login),
                 label: Text(_isConnecting
-                    ? 'Connecting over Tailscale...'
-                    : (_isConnected ? 'Disconnect SSH' : 'Connect to Termux')),
+                    ? 'Connecting...'
+                    : (_isConnected ? 'Disconnect SSH' : 'Connect to Host')),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _isConnected ? Colors.redAccent.shade700 : const Color(0xFF0284C7),
                   foregroundColor: Colors.white,

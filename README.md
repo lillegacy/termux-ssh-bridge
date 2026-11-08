@@ -2,11 +2,6 @@
 
 A secure Android ARM64 mobile application built with Flutter that acts as a secure SSH proxy and coding agent bridge to your Termux / PRoot environment over Tailscale.
 
-## Connection Details
-- **SSH User**: `uo_a12`
-- **Tailscale IP**: `100.103.180.37`
-- **Port**: `8022`
-
 ## Features
 1. **Tailscale SSH Configuration**: Input fields for Tailscale IP, Port, Username, and Password/SSH Key with secure persistence (`flutter_secure_storage` & `shared_preferences`).
 2. **SSH Connection & Authentication**: Connects via `SSHSocket.connect` and authenticates using `dartssh2`.
