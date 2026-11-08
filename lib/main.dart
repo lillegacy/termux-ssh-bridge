@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -18,12 +19,12 @@ class TermuxSshBridgeApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF0F172A), // Slate 900
-        primaryColor: const Color(0xFF38BDF8), // Sky 400
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
+        primaryColor: const Color(0xFF38BDF8),
         colorScheme: const ColorScheme.dark(
           primary: Color(0xFF38BDF8),
-          secondary: Color(0xFF818CF8), // Indigo 400
-          surface: Color(0xFF1E293B), // Slate 800
+          secondary: Color(0xFF818CF8),
+          surface: Color(0xFF1E293B),
         ),
         fontFamily: 'monospace',
         useMaterial3: true,
@@ -41,6 +42,38 @@ class LogEntry {
   LogEntry(this.text, {this.color = Colors.white}) : timestamp = DateTime.now();
 }
 
+class SSHProfile {
+  String id;
+  String name;
+  String host;
+  String port;
+  String username;
+
+  SSHProfile({
+    required this.id,
+    required this.name,
+    required this.host,
+    required this.port,
+    required this.username,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'host': host,
+        'port': port,
+        'username': username,
+      };
+
+  factory SSHProfile.fromJson(Map<String, dynamic> json) => SSHProfile(
+        id: json['id'],
+        name: json['name'],
+        host: json['host'],
+        port: json['port'],
+        username: json['username'],
+      );
+}
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -48,27 +81,32 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
-  // Controllers for Connection Settings (allowing any user, host, and port)
+class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+
+  // Connection Controllers
   final _hostController = TextEditingController();
   final _portController = TextEditingController(text: '8022');
   final _userController = TextEditingController();
   final _passwordController = TextEditingController();
 
-  // Controllers for Command Execution
+  // Command & Terminal Controllers
   final _commandController = TextEditingController();
+  final _scrollController = ScrollController();
 
   final _secureStorage = const FlutterSecureStorage();
-  
+
   SSHClient? _client;
   bool _isConnected = false;
   bool _isConnecting = false;
-  
-  final List<LogEntry> _logs = [];
-  final ScrollController _scrollController = ScrollController();
+  double _fontSize = 13.0;
 
-  // Quick preset coding agent / termux commands
-  final List<Map<String, String>> _quickCommands = [
+  final List<LogEntry> _logs = [];
+  List<SSHProfile> _profiles = [];
+  String? _activeProfileId;
+
+  // Custom Quick Command Macros
+  List<Map<String, String>> _quickCommands = [
     {'name': 'Whoami & Env', 'cmd': 'whoami && uname -a && pwd'},
     {'name': 'PRoot Info', 'cmd': 'proot --version || echo "PRoot active via standard termux"'},
     {'name': 'Disk Usage', 'cmd': 'df -h'},
@@ -80,38 +118,74 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSavedCredentials();
+    _tabController = TabController(length: 3, vsync: this);
+    _loadSavedData();
   }
 
-  Future<void> _loadSavedCredentials() async {
+  Future<void> _loadSavedData() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _hostController.text = prefs.getString('ssh_host') ?? '';
-      _portController.text = prefs.getString('ssh_port') ?? '8022';
-      _userController.text = prefs.getString('ssh_user') ?? '';
-    });
     
-    final savedPassword = await _secureStorage.read(key: 'ssh_password');
+    final profilesJson = prefs.getStringList('ssh_profiles');
+    if (profilesJson != null && profilesJson.isNotEmpty) {
+      setState(() {
+        _profiles = profilesJson.map((p) => SSHProfile.fromJson(jsonDecode(p))).toList();
+      });
+    } else {
+      _profiles = [
+        SSHProfile(id: 'default', name: 'Default Tailscale Termux', host: '', port: '8022', username: ''),
+      ];
+    }
+    _activeProfileId = prefs.getString('active_profile_id') ?? _profiles.first.id;
+    _loadProfileToControllers(_activeProfileId!);
+
+    final customCmdsJson = prefs.getStringList('custom_quick_cmds');
+    if (customCmdsJson != null && customCmdsJson.isNotEmpty) {
+      setState(() {
+        _quickCommands = customCmdsJson.map((c) => Map<String, String>.from(jsonDecode(c))).toList();
+      });
+    }
+
+    _addLog('Loaded profiles and preferences.', color: Colors.cyanAccent);
+  }
+
+  Future<void> _loadProfileToControllers(String profileId) async {
+    final profile = _profiles.firstWhere((p) => p.id == profileId, orElse: () => _profiles.first);
+    setState(() {
+      _activeProfileId = profile.id;
+      _hostController.text = profile.host;
+      _portController.text = profile.port;
+      _userController.text = profile.username;
+    });
+    final savedPassword = await _secureStorage.read(key: 'ssh_password_${profile.id}');
     if (savedPassword != null) {
       _passwordController.text = savedPassword;
+    } else {
+      _passwordController.clear();
     }
-    _addLog('Loaded saved configurations.', color: Colors.cyanAccent);
   }
 
-  Future<void> _saveCredentials() async {
+  Future<void> _saveCurrentProfile() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('ssh_host', _hostController.text.trim());
-    await prefs.setString('ssh_port', _portController.text.trim());
-    await prefs.setString('ssh_user', _userController.text.trim());
-    await _secureStorage.write(key: 'ssh_password', value: _passwordController.text);
-    _addLog('Credentials securely stored.', color: Colors.greenAccent);
+    final profile = _profiles.firstWhere((p) => p.id == _activeProfileId, orElse: () {
+      final newP = SSHProfile(id: DateTime.now().millisecondsSinceEpoch.toString(), name: 'Profile ${_profiles.length + 1}', host: '', port: '8022', username: '');
+      _profiles.add(newP);
+      return newP;
+    });
+
+    profile.host = _hostController.text.trim();
+    profile.port = _portController.text.trim();
+    profile.username = _userController.text.trim();
+
+    await prefs.setStringList('ssh_profiles', _profiles.map((p) => jsonEncode(p.toJson())).toList());
+    await prefs.setString('active_profile_id', profile.id);
+    await _secureStorage.write(key: 'ssh_password_${profile.id}', value: _passwordController.text);
+    _addLog('Profile "${profile.name}" saved securely.', color: Colors.greenAccent);
   }
 
   void _addLog(String text, {Color color = Colors.white}) {
     setState(() {
       _logs.add(LogEntry(text, color: color));
     });
-    // Auto scroll to bottom of terminal log
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -131,23 +205,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final username = _userController.text.trim();
     final password = _passwordController.text;
 
-    if (host.isEmpty) {
-      _addLog('ERROR: Please enter a valid SSH host or Tailscale IP.', color: Colors.redAccent);
+    if (host.isEmpty || username.isEmpty) {
+      _addLog('ERROR: Host and Username cannot be empty.', color: Colors.redAccent);
       return;
     }
 
-    if (username.isEmpty) {
-      _addLog('ERROR: Please enter an SSH username.', color: Colors.redAccent);
-      return;
-    }
-    
     setState(() {
       _isConnecting = true;
     });
 
-    await _saveCredentials();
+    await _saveCurrentProfile();
 
-    _addLog('Connecting to $username@$host:$port over SSH / Tailscale...', color: Colors.yellowAccent);
+    _addLog('Connecting to $username@$host:$port over SSH...', color: Colors.yellowAccent);
 
     try {
       final socket = await SSHSocket.connect(
@@ -162,20 +231,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
         onPasswordRequest: () => password,
       );
 
-      // Wait for authentication
       await _client!.authenticated;
 
+      if (!mounted) return;
       setState(() {
         _isConnected = true;
         _isConnecting = false;
       });
 
-      _addLog('SUCCESS: Connected and authenticated to $username@$host:$port!', color: Colors.greenAccent);
-      
-      // Run initial Greeting command
+      _addLog('SUCCESS: Connected to $username@$host:$port!', color: Colors.greenAccent);
       _executeCommand('uname -a && uptime');
 
     } catch (e) {
+      if (!mounted) return;
       _addLog('ERROR: Connection failed: $e', color: Colors.redAccent);
       setState(() {
         _isConnected = false;
@@ -208,7 +276,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       final session = await _client!.execute(commandStr);
       
-      // Read stdout
       session.stdout.listen((data) {
         final output = String.fromCharCodes(data).trimRight();
         if (output.isNotEmpty) {
@@ -216,7 +283,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       });
 
-      // Read stderr
       session.stderr.listen((data) {
         final errorOutput = String.fromCharCodes(data).trimRight();
         if (errorOutput.isNotEmpty) {
@@ -234,8 +300,83 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  void _showAddCommandDialog() {
+    final nameController = TextEditingController();
+    final cmdController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add Custom Command Macro'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Macro Name')),
+            const SizedBox(height: 10),
+            TextField(controller: cmdController, decoration: const InputDecoration(labelText: 'Shell Command / Agent Task')),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () async {
+              if (nameController.text.isNotEmpty && cmdController.text.isNotEmpty) {
+                setState(() {
+                  _quickCommands.add({'name': nameController.text.trim(), 'cmd': cmdController.text.trim()});
+                });
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setStringList('custom_quick_cmds', _quickCommands.map((c) => jsonEncode(c)).toList());
+                if (!ctx.mounted) return;
+                Navigator.pop(ctx);
+                _addLog('Added macro: ${nameController.text}', color: Colors.greenAccent);
+              }
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAddProfileDialog() {
+    final nameController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New SSH Profile'),
+        content: TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Profile Name (e.g. VPS / Termux)')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () async {
+              if (nameController.text.isNotEmpty) {
+                final newP = SSHProfile(
+                  id: DateTime.now().millisecondsSinceEpoch.toString(),
+                  name: nameController.text.trim(),
+                  host: '',
+                  port: '8022',
+                  username: '',
+                );
+                setState(() {
+                  _profiles.add(newP);
+                  _activeProfileId = newP.id;
+                });
+                _loadProfileToControllers(newP.id);
+                await _saveCurrentProfile();
+                if (!ctx.mounted) return;
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
+    _tabController.dispose();
     _hostController.dispose();
     _portController.dispose();
     _userController.dispose();
@@ -253,32 +394,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
         title: Row(
           children: [
             const Icon(Icons.terminal, color: Color(0xFF38BDF8)),
-            const SizedBox(width: 12),
-            const Text('Termux SSH Bridge', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            const SizedBox(width: 10),
+            const Text('Termux SSH Bridge', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
             const Spacer(),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
                 color: _isConnected ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2),
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(10),
                 border: Border.all(color: _isConnected ? Colors.green : Colors.red),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    width: 8,
-                    height: 8,
+                    width: 7,
+                    height: 7,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: _isConnected ? Colors.greenAccent : Colors.redAccent,
                     ),
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 5),
                   Text(
-                    _isConnected ? 'CONNECTED' : 'DISCONNECTED',
+                    _isConnected ? 'ONLINE' : 'OFFLINE',
                     style: TextStyle(
-                      fontSize: 12,
+                      fontSize: 11,
                       fontWeight: FontWeight.bold,
                       color: _isConnected ? Colors.greenAccent : Colors.redAccent,
                     ),
@@ -288,180 +429,239 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
           ],
         ),
-        backgroundColor: const Color(0xFF1E293B),
-        elevation: 0,
+        bottom: TabBar(
+          controller: _tabController,
+          indicatorColor: const Color(0xFF38BDF8),
+          tabs: const [
+            Tab(icon: Icon(Icons.settings, size: 18), text: 'Profiles'),
+            Tab(icon: Icon(Icons.bolt, size: 18), text: 'Macros'),
+            Tab(icon: Icon(Icons.computer, size: 18), text: 'Terminal'),
+          ],
+        ),
       ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          bool isWide = constraints.maxWidth > 900;
-          return isWide ? _buildWideLayout(context) : _buildMobileLayout(context);
-        },
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _buildProfilesAndConnectionTab(),
+          _buildMacrosTab(),
+          _buildTerminalTab(),
+        ],
       ),
     );
   }
 
-  Widget _buildConnectionCard() {
-    return Card(
-      color: const Color(0xFF1E293B),
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'SSH & Tailscale Connection',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF38BDF8)),
-            ),
-            const SizedBox(height: 12),
-            Row(
+  Widget _buildProfilesAndConnectionTab() {
+    return ListView(
+      padding: const EdgeInsets.all(16.0),
+      children: [
+        Card(
+          elevation: 3,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: Padding(
+            padding: const EdgeInsets.all(14.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  flex: 3,
-                  child: TextField(
-                    controller: _hostController,
-                    decoration: const InputDecoration(
-                      labelText: 'Host / Tailscale IP',
-                      hintText: 'e.g. 100.x.x.x',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.network_ping),
-                      isDense: true,
+                Row(
+                  children: [
+                    const Text('SSH Connection Profiles', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Color(0xFF38BDF8))),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.add_circle_outline, size: 22),
+                      tooltip: 'Add Profile',
+                      onPressed: _showAddProfileDialog,
                     ),
-                  ),
+                  ],
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  flex: 1,
-                  child: TextField(
-                    controller: _portController,
-                    decoration: const InputDecoration(
-                      labelText: 'Port',
-                      hintText: '8022',
-                      border: OutlineInputBorder(),
-                      isDense: true,
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  value: _activeProfileId,
+                  decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
+                  items: _profiles.map((p) => DropdownMenuItem(value: p.id, child: Text(p.name))).toList(),
+                  onChanged: (val) {
+                    if (val != null) {
+                      _loadProfileToControllers(val);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Card(
+          elevation: 3,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Host & Credentials', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF38BDF8))),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: TextField(
+                        controller: _hostController,
+                        decoration: const InputDecoration(labelText: 'Host / Tailscale IP', hintText: 'e.g. 100.x.x.x', border: OutlineInputBorder(), prefixIcon: Icon(Icons.network_ping), isDense: true),
+                      ),
                     ),
-                    keyboardType: TextInputType.number,
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 1,
+                      child: TextField(
+                        controller: _portController,
+                        decoration: const InputDecoration(labelText: 'Port', hintText: '8022', border: OutlineInputBorder(), isDense: true),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _userController,
+                        decoration: const InputDecoration(labelText: 'Username', hintText: 'e.g. u0_a123', border: OutlineInputBorder(), prefixIcon: Icon(Icons.person), isDense: true),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: TextField(
+                        controller: _passwordController,
+                        decoration: const InputDecoration(labelText: 'Password / Key', border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock), isDense: true),
+                        obscureText: true,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _isConnecting ? null : (_isConnected ? _disconnect : _connect),
+                    icon: Icon(_isConnected ? Icons.logout : Icons.login),
+                    label: Text(_isConnecting ? 'Connecting...' : (_isConnected ? 'Disconnect SSH' : 'Connect to Host')),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isConnected ? Colors.redAccent.shade700 : const Color(0xFF0284C7),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-            Row(
+          ),
+        ),
+        const SizedBox(height: 16),
+        Card(
+          elevation: 3,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: _userController,
-                    decoration: const InputDecoration(
-                      labelText: 'SSH Username',
-                      hintText: 'e.g. u0_a123',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.person),
-                      isDense: true,
+                const Text('Terminal Font Size', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Color(0xFF38BDF8))),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Text('Size: '),
+                    Expanded(
+                      child: Slider(
+                        value: _fontSize,
+                        min: 10.0,
+                        max: 20.0,
+                        divisions: 10,
+                        label: _fontSize.toStringAsFixed(1),
+                        onChanged: (val) => setState(() => _fontSize = val),
+                      ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
-                    controller: _passwordController,
-                    decoration: const InputDecoration(
-                      labelText: 'Password / Key',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.lock),
-                      isDense: true,
-                    ),
-                    obscureText: true,
-                  ),
+                    Text('${_fontSize.toStringAsFixed(1)} pt'),
+                  ],
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _isConnecting
-                    ? null
-                    : (_isConnected ? _disconnect : _connect),
-                icon: Icon(_isConnected ? Icons.logout : Icons.login),
-                label: Text(_isConnecting
-                    ? 'Connecting...'
-                    : (_isConnected ? 'Disconnect SSH' : 'Connect to Host')),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _isConnected ? Colors.redAccent.shade700 : const Color(0xFF0284C7),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMacrosTab() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text('Coding Agent & Quick Macros', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF38BDF8))),
+              const Spacer(),
+              ElevatedButton.icon(
+                onPressed: _showAddCommandDialog,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add Macro'),
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7), foregroundColor: Colors.white),
               ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildQuickActionsCard() {
-    return Card(
-      color: const Color(0xFF1E293B),
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Coding Agent & Termux Presets',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF38BDF8)),
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8.0,
-              runSpacing: 8.0,
-              children: _quickCommands.map((preset) {
-                return ActionChip(
-                  label: Text(preset['name']!, style: const TextStyle(fontSize: 12)),
-                  backgroundColor: const Color(0xFF334155),
-                  onPressed: _isConnected ? () => _executeCommand(preset['cmd']!) : null,
+            ],
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: ListView.builder(
+              itemCount: _quickCommands.length,
+              itemBuilder: (context, index) {
+                final cmd = _quickCommands[index];
+                return Card(
+                  margin: const EdgeInsets.symmetric(vertical: 6),
+                  elevation: 2,
+                  child: ListTile(
+                    title: Text(cmd['name']!, style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text(cmd['cmd']!, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.play_arrow, color: Color(0xFF38BDF8)),
+                      tooltip: 'Run Command',
+                      onPressed: _isConnected ? () => _executeCommand(cmd['cmd']!) : null,
+                    ),
+                  ),
                 );
-              }).toList(),
+              },
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildTerminalConsoleCard() {
-    return Card(
-      color: const Color(0xFF090D16),
-      elevation: 4,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: const BorderSide(color: Color(0xFF334155)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Text(
-                  'Terminal Output & Logs',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.grey),
-                ),
-                const Spacer(),
-                IconButton(
-                  icon: const Icon(Icons.delete_outline, size: 18, color: Colors.grey),
-                  tooltip: 'Clear Logs',
-                  onPressed: () => setState(() => _logs.clear()),
-                ),
-              ],
-            ),
-            const Divider(color: Color(0xFF334155)),
-            Expanded(
+  Widget _buildTerminalTab() {
+    return Padding(
+      padding: const EdgeInsets.all(12.0),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Text('Live Logs (${_logs.length})', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.delete_outline, size: 18, color: Colors.grey),
+                tooltip: 'Clear Logs',
+                onPressed: () => setState(() => _logs.clear()),
+              ),
+            ],
+          ),
+          const Divider(height: 4),
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF090D16),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade700),
+              ),
               child: ListView.builder(
                 controller: _scrollController,
                 itemCount: _logs.length,
@@ -471,109 +671,51 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 2.0),
                     child: SelectableText(
                       '[${log.timestamp.hour.toString().padLeft(2, '0')}:${log.timestamp.minute.toString().padLeft(2, '0')}:${log.timestamp.second.toString().padLeft(2, '0')}] ${log.text}',
-                      style: TextStyle(color: log.color, fontSize: 13, fontFamily: 'monospace'),
+                      style: TextStyle(color: log.color, fontSize: _fontSize, fontFamily: 'monospace'),
                     ),
                   );
                 },
               ),
             ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _commandController,
-                    enabled: _isConnected,
-                    style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
-                    decoration: InputDecoration(
-                      hintText: _isConnected ? 'Enter bash command or coding agent task...' : 'Connect to execute commands',
-                      hintStyle: const TextStyle(color: Colors.grey),
-                      border: const OutlineInputBorder(),
-                      isDense: true,
-                      filled: true,
-                      fillColor: const Color(0xFF1E293B),
-                    ),
-                    onSubmitted: (value) {
-                      _executeCommand(value);
-                      _commandController.clear();
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: _isConnected
-                      ? () {
-                          _executeCommand(_commandController.text);
-                          _commandController.clear();
-                        }
-                      : null,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF38BDF8),
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  ),
-                  child: const Text('Send', style: TextStyle(fontWeight: FontWeight.bold)),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildWideLayout(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 380,
-            child: Column(
-              children: [
-                _buildConnectionCard(),
-                const SizedBox(height: 16),
-                Expanded(child: _buildQuickActionsCard()),
-              ],
-            ),
           ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: _buildTerminalConsoleCard(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMobileLayout(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(12.0),
-      child: Column(
-        children: [
-          ExpansionTile(
-            title: const Text('Connection & Presets', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-            collapsedBackgroundColor: const Color(0xFF1E293B),
-            backgroundColor: const Color(0xFF1E293B),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            collapsedShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          const SizedBox(height: 8),
+          Row(
             children: [
-              Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Column(
-                  children: [
-                    _buildConnectionCard(),
-                    const SizedBox(height: 12),
-                    _buildQuickActionsCard(),
-                  ],
+              Expanded(
+                child: TextField(
+                  controller: _commandController,
+                  enabled: _isConnected,
+                  style: TextStyle(fontFamily: 'monospace', fontSize: _fontSize),
+                  decoration: InputDecoration(
+                    hintText: _isConnected ? 'Enter bash command or coding agent task...' : 'Connect to execute commands',
+                    hintStyle: const TextStyle(color: Colors.grey),
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    filled: true,
+                    fillColor: const Color(0xFF1E293B),
+                  ),
+                  onSubmitted: (value) {
+                    _executeCommand(value);
+                    _commandController.clear();
+                  },
                 ),
               ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: _isConnected
+                    ? () {
+                        _executeCommand(_commandController.text);
+                        _commandController.clear();
+                      }
+                    : null,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF38BDF8),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                ),
+                child: const Text('Send', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
             ],
-          ),
-          const SizedBox(height: 12),
-          Expanded(
-            child: _buildTerminalConsoleCard(),
           ),
         ],
       ),
