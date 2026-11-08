@@ -10,6 +10,30 @@ A secure Android ARM64 mobile application built with Flutter that acts as a secu
 5. **Android ARM64 & Android 12+ Optimized**: Built specifically for modern Android devices.
 6. **CI/CD Pipeline**: GitHub Actions workflow (`.github/workflows/build_apk.yml`) to automatically compile the release APK.
 
+## Connecting from the Terminal tab
+
+The terminal command box also supports a local SSH connection command:
+
+```text
+connect <host> <port> <username>
+```
+
+For example:
+
+```text
+connect 100.x.x.x 8022 your_user
+```
+
+The app prompts for the password securely when it is not included. You may also provide it as a fourth argument, although prompting is safer because inline passwords can remain visible in the input field.
+
+The status badge has three states:
+
+- **OFFLINE**: No SSH session is active.
+- **CONNECTING**: The app is opening the SSH socket and authenticating.
+- **ONLINE**: SSH authentication succeeded.
+
+Make sure Tailscale is installed and connected on the Android device before connecting.
+
 ## Building the APK
 ```bash
 flutter pub get

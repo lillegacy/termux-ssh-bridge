@@ -81,7 +81,8 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProviderStateMixin {
+class _DashboardScreenState extends State<DashboardScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   // Connection Controllers
@@ -108,10 +109,19 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
   // Custom Quick Command Macros
   List<Map<String, String>> _quickCommands = [
     {'name': 'Whoami & Env', 'cmd': 'whoami && uname -a && pwd'},
-    {'name': 'PRoot Info', 'cmd': 'proot --version || echo "PRoot active via standard termux"'},
+    {
+      'name': 'PRoot Info',
+      'cmd': 'proot --version || echo "PRoot active via standard termux"'
+    },
     {'name': 'Disk Usage', 'cmd': 'df -h'},
-    {'name': 'Tailscale Status', 'cmd': 'tailscale status || echo "Tailscale service running on host"'},
-    {'name': 'Coding Agent (Git Status)', 'cmd': 'git status || echo "Not a git repo"'},
+    {
+      'name': 'Tailscale Status',
+      'cmd': 'tailscale status || echo "Tailscale service running on host"'
+    },
+    {
+      'name': 'Coding Agent (Git Status)',
+      'cmd': 'git status || echo "Not a git repo"'
+    },
     {'name': 'Python Agent Test', 'cmd': 'python3 --version && pip list'},
   ];
 
@@ -124,24 +134,34 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
 
   Future<void> _loadSavedData() async {
     final prefs = await SharedPreferences.getInstance();
-    
+
     final profilesJson = prefs.getStringList('ssh_profiles');
     if (profilesJson != null && profilesJson.isNotEmpty) {
       setState(() {
-        _profiles = profilesJson.map((p) => SSHProfile.fromJson(jsonDecode(p))).toList();
+        _profiles = profilesJson
+            .map((p) => SSHProfile.fromJson(jsonDecode(p)))
+            .toList();
       });
     } else {
       _profiles = [
-        SSHProfile(id: 'default', name: 'Default Tailscale Termux', host: '', port: '8022', username: ''),
+        SSHProfile(
+            id: 'default',
+            name: 'Default Tailscale Termux',
+            host: '',
+            port: '8022',
+            username: ''),
       ];
     }
-    _activeProfileId = prefs.getString('active_profile_id') ?? _profiles.first.id;
+    _activeProfileId =
+        prefs.getString('active_profile_id') ?? _profiles.first.id;
     _loadProfileToControllers(_activeProfileId!);
 
     final customCmdsJson = prefs.getStringList('custom_quick_cmds');
     if (customCmdsJson != null && customCmdsJson.isNotEmpty) {
       setState(() {
-        _quickCommands = customCmdsJson.map((c) => Map<String, String>.from(jsonDecode(c))).toList();
+        _quickCommands = customCmdsJson
+            .map((c) => Map<String, String>.from(jsonDecode(c)))
+            .toList();
       });
     }
 
@@ -149,14 +169,16 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
   }
 
   Future<void> _loadProfileToControllers(String profileId) async {
-    final profile = _profiles.firstWhere((p) => p.id == profileId, orElse: () => _profiles.first);
+    final profile = _profiles.firstWhere((p) => p.id == profileId,
+        orElse: () => _profiles.first);
     setState(() {
       _activeProfileId = profile.id;
       _hostController.text = profile.host;
       _portController.text = profile.port;
       _userController.text = profile.username;
     });
-    final savedPassword = await _secureStorage.read(key: 'ssh_password_${profile.id}');
+    final savedPassword =
+        await _secureStorage.read(key: 'ssh_password_${profile.id}');
     if (savedPassword != null) {
       _passwordController.text = savedPassword;
     } else {
@@ -166,8 +188,14 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
 
   Future<void> _saveCurrentProfile() async {
     final prefs = await SharedPreferences.getInstance();
-    final profile = _profiles.firstWhere((p) => p.id == _activeProfileId, orElse: () {
-      final newP = SSHProfile(id: DateTime.now().millisecondsSinceEpoch.toString(), name: 'Profile ${_profiles.length + 1}', host: '', port: '8022', username: '');
+    final profile =
+        _profiles.firstWhere((p) => p.id == _activeProfileId, orElse: () {
+      final newP = SSHProfile(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          name: 'Profile ${_profiles.length + 1}',
+          host: '',
+          port: '8022',
+          username: '');
       _profiles.add(newP);
       return newP;
     });
@@ -176,10 +204,13 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
     profile.port = _portController.text.trim();
     profile.username = _userController.text.trim();
 
-    await prefs.setStringList('ssh_profiles', _profiles.map((p) => jsonEncode(p.toJson())).toList());
+    await prefs.setStringList(
+        'ssh_profiles', _profiles.map((p) => jsonEncode(p.toJson())).toList());
     await prefs.setString('active_profile_id', profile.id);
-    await _secureStorage.write(key: 'ssh_password_${profile.id}', value: _passwordController.text);
-    _addLog('Profile "${profile.name}" saved securely.', color: Colors.greenAccent);
+    await _secureStorage.write(
+        key: 'ssh_password_${profile.id}', value: _passwordController.text);
+    _addLog('Profile "${profile.name}" saved securely.',
+        color: Colors.greenAccent);
   }
 
   void _addLog(String text, {Color color = Colors.white}) {
@@ -206,17 +237,30 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
     final password = _passwordController.text;
 
     if (host.isEmpty || username.isEmpty) {
-      _addLog('ERROR: Host and Username cannot be empty.', color: Colors.redAccent);
+      _addLog('ERROR: Host and Username cannot be empty.',
+          color: Colors.redAccent);
       return;
     }
 
+    await _saveCurrentProfile();
+    await _connectTo(host, port, username, password);
+  }
+
+  Future<void> _connectTo(
+    String host,
+    int port,
+    String username,
+    String password,
+  ) async {
+    if (_isConnecting) return;
+
     setState(() {
       _isConnecting = true;
+      _isConnected = false;
     });
 
-    await _saveCurrentProfile();
-
-    _addLog('Connecting to $username@$host:$port over SSH...', color: Colors.yellowAccent);
+    _addLog('Connecting to $username@$host:$port over SSH...',
+        color: Colors.yellowAccent);
 
     try {
       final socket = await SSHSocket.connect(
@@ -225,13 +269,14 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
         timeout: const Duration(seconds: 10),
       );
 
-      _client = SSHClient(
+      final client = SSHClient(
         socket,
         username: username,
         onPasswordRequest: () => password,
       );
+      _client = client;
 
-      await _client!.authenticated;
+      await client.authenticated;
 
       if (!mounted) return;
       setState(() {
@@ -239,16 +284,40 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
         _isConnecting = false;
       });
 
-      _addLog('SUCCESS: Connected to $username@$host:$port!', color: Colors.greenAccent);
+      _addLog('SUCCESS: Connected to $username@$host:$port!',
+          color: Colors.greenAccent);
       _executeCommand('uname -a && uptime');
-
-    } catch (e) {
+    } catch (error) {
+      try {
+        _client?.close();
+      } catch (_) {}
       if (!mounted) return;
-      _addLog('ERROR: Connection failed: $e', color: Colors.redAccent);
       setState(() {
+        _client = null;
         _isConnected = false;
         _isConnecting = false;
       });
+
+      final message = error.toString().toLowerCase();
+      String guidance;
+      if (message.contains('timed out') || message.contains('timeout')) {
+        guidance =
+            'Connection timed out. Check that Tailscale is connected and the host/port are reachable.';
+      } else if (message.contains('authentication') ||
+          message.contains('password') ||
+          message.contains('permission denied')) {
+        guidance =
+            'Authentication failed. Check the username, password, and SSH server authentication settings.';
+      } else if (message.contains('refused') ||
+          message.contains('unreachable')) {
+        guidance =
+            'Host or port is unreachable. Verify the Tailscale address and SSH port.';
+      } else {
+        guidance =
+            'Check that Tailscale is connected on this phone and that the SSH server is running.';
+      }
+      _addLog('ERROR: Connection failed: $error', color: Colors.redAccent);
+      _addLog('HINT: $guidance', color: Colors.orangeAccent);
     }
   }
 
@@ -263,6 +332,86 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
     _addLog('Disconnected from SSH server.', color: Colors.orangeAccent);
   }
 
+  Future<String?> _promptForPassword(String host) async {
+    final passwordController = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Password for $host'),
+        content: TextField(
+          controller: passwordController,
+          autofocus: true,
+          obscureText: true,
+          decoration: const InputDecoration(
+            labelText: 'SSH Password',
+            helperText: 'The password is not written to the terminal log.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () =>
+                Navigator.pop(dialogContext, passwordController.text),
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    );
+    passwordController.dispose();
+    return result;
+  }
+
+  Future<void> _handleTerminalInput(String commandStr) async {
+    final input = commandStr.trim();
+    if (input.isEmpty) return;
+
+    final match = RegExp(
+      r'^connect\s+(\S+)\s+(\d{1,5})\s+(\S+)(?:\s+(.*))?$',
+      caseSensitive: false,
+    ).firstMatch(input);
+
+    if (match == null) {
+      if (!_isConnected) {
+        _addLog(
+          'Local command not recognized. Use: connect <host> <port> <username> [password]',
+          color: Colors.orangeAccent,
+        );
+      }
+      await _executeCommand(input);
+      return;
+    }
+
+    final host = match.group(1)!;
+    final port = int.parse(match.group(2)!);
+    final username = match.group(3)!;
+    final inlinePassword = match.group(4)?.trim();
+
+    _addLog('\$ connect $host $port $username', color: const Color(0xFF38BDF8));
+
+    if (port < 1 || port > 65535) {
+      _addLog('ERROR: Port must be between 1 and 65535.',
+          color: Colors.redAccent);
+      return;
+    }
+
+    final password = inlinePassword ?? await _promptForPassword(host);
+    if (password == null) {
+      _addLog('Connection cancelled.', color: Colors.orangeAccent);
+      return;
+    }
+
+    _hostController.text = host;
+    _portController.text = '$port';
+    _userController.text = username;
+    _passwordController.text = password;
+
+    await _saveCurrentProfile();
+    await _connectTo(host, port, username, password);
+  }
+
   Future<void> _executeCommand(String commandStr) async {
     if (_client == null || !_isConnected) {
       _addLog('Error: Not connected to SSH server.', color: Colors.redAccent);
@@ -275,7 +424,7 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
 
     try {
       final session = await _client!.execute(commandStr);
-      
+
       session.stdout.listen((data) {
         final output = String.fromCharCodes(data).trimRight();
         if (output.isNotEmpty) {
@@ -293,7 +442,8 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
       await session.done;
       final exitCode = session.exitCode ?? 0;
       if (exitCode != 0) {
-        _addLog('[Process exited with code $exitCode]', color: Colors.orangeAccent);
+        _addLog('[Process exited with code $exitCode]',
+            color: Colors.orangeAccent);
       }
     } catch (e) {
       _addLog('Execution error: $e', color: Colors.redAccent);
@@ -311,24 +461,36 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Macro Name')),
+            TextField(
+                controller: nameController,
+                decoration: const InputDecoration(labelText: 'Macro Name')),
             const SizedBox(height: 10),
-            TextField(controller: cmdController, decoration: const InputDecoration(labelText: 'Shell Command / Agent Task')),
+            TextField(
+                controller: cmdController,
+                decoration: const InputDecoration(
+                    labelText: 'Shell Command / Agent Task')),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () async {
-              if (nameController.text.isNotEmpty && cmdController.text.isNotEmpty) {
+              if (nameController.text.isNotEmpty &&
+                  cmdController.text.isNotEmpty) {
                 setState(() {
-                  _quickCommands.add({'name': nameController.text.trim(), 'cmd': cmdController.text.trim()});
+                  _quickCommands.add({
+                    'name': nameController.text.trim(),
+                    'cmd': cmdController.text.trim()
+                  });
                 });
                 final prefs = await SharedPreferences.getInstance();
-                await prefs.setStringList('custom_quick_cmds', _quickCommands.map((c) => jsonEncode(c)).toList());
+                await prefs.setStringList('custom_quick_cmds',
+                    _quickCommands.map((c) => jsonEncode(c)).toList());
                 if (!ctx.mounted) return;
                 Navigator.pop(ctx);
-                _addLog('Added macro: ${nameController.text}', color: Colors.greenAccent);
+                _addLog('Added macro: ${nameController.text}',
+                    color: Colors.greenAccent);
               }
             },
             child: const Text('Save'),
@@ -344,9 +506,13 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('New SSH Profile'),
-        content: TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Profile Name (e.g. VPS / Termux)')),
+        content: TextField(
+            controller: nameController,
+            decoration: const InputDecoration(
+                labelText: 'Profile Name (e.g. VPS / Termux)')),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () async {
               if (nameController.text.isNotEmpty) {
@@ -395,14 +561,25 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
           children: [
             const Icon(Icons.terminal, color: Color(0xFF38BDF8)),
             const SizedBox(width: 10),
-            const Text('Termux SSH Bridge', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+            const Text('Termux SSH Bridge',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
             const Spacer(),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
-                color: _isConnected ? Colors.green.withOpacity(0.2) : Colors.red.withOpacity(0.2),
+                color: _isConnected
+                    ? Colors.green.withOpacity(0.2)
+                    : _isConnecting
+                        ? Colors.orange.withOpacity(0.2)
+                        : Colors.red.withOpacity(0.2),
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: _isConnected ? Colors.green : Colors.red),
+                border: Border.all(
+                  color: _isConnected
+                      ? Colors.green
+                      : _isConnecting
+                          ? Colors.orange
+                          : Colors.red,
+                ),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -412,16 +589,28 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
                     height: 7,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: _isConnected ? Colors.greenAccent : Colors.redAccent,
+                      color: _isConnected
+                          ? Colors.greenAccent
+                          : _isConnecting
+                              ? Colors.orangeAccent
+                              : Colors.redAccent,
                     ),
                   ),
                   const SizedBox(width: 5),
                   Text(
-                    _isConnected ? 'ONLINE' : 'OFFLINE',
+                    _isConnected
+                        ? 'ONLINE'
+                        : _isConnecting
+                            ? 'CONNECTING'
+                            : 'OFFLINE',
                     style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.bold,
-                      color: _isConnected ? Colors.greenAccent : Colors.redAccent,
+                      color: _isConnected
+                          ? Colors.greenAccent
+                          : _isConnecting
+                              ? Colors.orangeAccent
+                              : Colors.redAccent,
                     ),
                   ),
                 ],
@@ -456,7 +645,8 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
       children: [
         Card(
           elevation: 3,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: Padding(
             padding: const EdgeInsets.all(14.0),
             child: Column(
@@ -464,7 +654,11 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
               children: [
                 Row(
                   children: [
-                    const Text('SSH Connection Profiles', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Color(0xFF38BDF8))),
+                    const Text('SSH Connection Profiles',
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                            color: Color(0xFF38BDF8))),
                     const Spacer(),
                     IconButton(
                       icon: const Icon(Icons.add_circle_outline, size: 22),
@@ -476,8 +670,12 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
                   value: _activeProfileId,
-                  decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
-                  items: _profiles.map((p) => DropdownMenuItem(value: p.id, child: Text(p.name))).toList(),
+                  decoration: const InputDecoration(
+                      border: OutlineInputBorder(), isDense: true),
+                  items: _profiles
+                      .map((p) =>
+                          DropdownMenuItem(value: p.id, child: Text(p.name)))
+                      .toList(),
                   onChanged: (val) {
                     if (val != null) {
                       _loadProfileToControllers(val);
@@ -491,13 +689,18 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
         const SizedBox(height: 16),
         Card(
           elevation: 3,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Host & Credentials', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF38BDF8))),
+                const Text('Host & Credentials',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                        color: Color(0xFF38BDF8))),
                 const SizedBox(height: 12),
                 Row(
                   children: [
@@ -505,7 +708,12 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
                       flex: 3,
                       child: TextField(
                         controller: _hostController,
-                        decoration: const InputDecoration(labelText: 'Host / Tailscale IP', hintText: 'e.g. 100.x.x.x', border: OutlineInputBorder(), prefixIcon: Icon(Icons.network_ping), isDense: true),
+                        decoration: const InputDecoration(
+                            labelText: 'Host / Tailscale IP',
+                            hintText: 'e.g. 100.x.x.x',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.network_ping),
+                            isDense: true),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -513,7 +721,11 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
                       flex: 1,
                       child: TextField(
                         controller: _portController,
-                        decoration: const InputDecoration(labelText: 'Port', hintText: '8022', border: OutlineInputBorder(), isDense: true),
+                        decoration: const InputDecoration(
+                            labelText: 'Port',
+                            hintText: '8022',
+                            border: OutlineInputBorder(),
+                            isDense: true),
                         keyboardType: TextInputType.number,
                       ),
                     ),
@@ -525,14 +737,23 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
                     Expanded(
                       child: TextField(
                         controller: _userController,
-                        decoration: const InputDecoration(labelText: 'Username', hintText: 'e.g. u0_a123', border: OutlineInputBorder(), prefixIcon: Icon(Icons.person), isDense: true),
+                        decoration: const InputDecoration(
+                            labelText: 'Username',
+                            hintText: 'e.g. u0_a123',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.person),
+                            isDense: true),
                       ),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: TextField(
                         controller: _passwordController,
-                        decoration: const InputDecoration(labelText: 'Password / Key', border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock), isDense: true),
+                        decoration: const InputDecoration(
+                            labelText: 'Password / Key',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.lock),
+                            isDense: true),
                         obscureText: true,
                       ),
                     ),
@@ -542,14 +763,23 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: _isConnecting ? null : (_isConnected ? _disconnect : _connect),
+                    onPressed: _isConnecting
+                        ? null
+                        : (_isConnected ? _disconnect : _connect),
                     icon: Icon(_isConnected ? Icons.logout : Icons.login),
-                    label: Text(_isConnecting ? 'Connecting...' : (_isConnected ? 'Disconnect SSH' : 'Connect to Host')),
+                    label: Text(_isConnecting
+                        ? 'Connecting...'
+                        : (_isConnected
+                            ? 'Disconnect SSH'
+                            : 'Connect to Host')),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: _isConnected ? Colors.redAccent.shade700 : const Color(0xFF0284C7),
+                      backgroundColor: _isConnected
+                          ? Colors.redAccent.shade700
+                          : const Color(0xFF0284C7),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
                     ),
                   ),
                 ),
@@ -560,13 +790,18 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
         const SizedBox(height: 16),
         Card(
           elevation: 3,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Terminal Font Size', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Color(0xFF38BDF8))),
+                const Text('Terminal Font Size',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                        color: Color(0xFF38BDF8))),
                 const SizedBox(height: 10),
                 Row(
                   children: [
@@ -600,13 +835,19 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
         children: [
           Row(
             children: [
-              const Text('Coding Agent & Quick Macros', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF38BDF8))),
+              const Text('Coding Agent & Quick Macros',
+                  style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                      color: Color(0xFF38BDF8))),
               const Spacer(),
               ElevatedButton.icon(
                 onPressed: _showAddCommandDialog,
                 icon: const Icon(Icons.add, size: 18),
                 label: const Text('Add Macro'),
-                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7), foregroundColor: Colors.white),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0284C7),
+                    foregroundColor: Colors.white),
               ),
             ],
           ),
@@ -620,12 +861,18 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
                   margin: const EdgeInsets.symmetric(vertical: 6),
                   elevation: 2,
                   child: ListTile(
-                    title: Text(cmd['name']!, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text(cmd['cmd']!, style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+                    title: Text(cmd['name']!,
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text(cmd['cmd']!,
+                        style: const TextStyle(
+                            fontFamily: 'monospace', fontSize: 12)),
                     trailing: IconButton(
-                      icon: const Icon(Icons.play_arrow, color: Color(0xFF38BDF8)),
+                      icon: const Icon(Icons.play_arrow,
+                          color: Color(0xFF38BDF8)),
                       tooltip: 'Run Command',
-                      onPressed: _isConnected ? () => _executeCommand(cmd['cmd']!) : null,
+                      onPressed: _isConnected
+                          ? () => _executeCommand(cmd['cmd']!)
+                          : null,
                     ),
                   ),
                 );
@@ -644,10 +891,13 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
         children: [
           Row(
             children: [
-              Text('Live Logs (${_logs.length})', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+              Text('Live Logs (${_logs.length})',
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, color: Colors.grey)),
               const Spacer(),
               IconButton(
-                icon: const Icon(Icons.delete_outline, size: 18, color: Colors.grey),
+                icon: const Icon(Icons.delete_outline,
+                    size: 18, color: Colors.grey),
                 tooltip: 'Clear Logs',
                 onPressed: () => setState(() => _logs.clear()),
               ),
@@ -671,7 +921,10 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
                     padding: const EdgeInsets.symmetric(vertical: 2.0),
                     child: SelectableText(
                       '[${log.timestamp.hour.toString().padLeft(2, '0')}:${log.timestamp.minute.toString().padLeft(2, '0')}:${log.timestamp.second.toString().padLeft(2, '0')}] ${log.text}',
-                      style: TextStyle(color: log.color, fontSize: _fontSize, fontFamily: 'monospace'),
+                      style: TextStyle(
+                          color: log.color,
+                          fontSize: _fontSize,
+                          fontFamily: 'monospace'),
                     ),
                   );
                 },
@@ -684,10 +937,13 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
               Expanded(
                 child: TextField(
                   controller: _commandController,
-                  enabled: _isConnected,
-                  style: TextStyle(fontFamily: 'monospace', fontSize: _fontSize),
+                  enabled: !_isConnecting,
+                  style:
+                      TextStyle(fontFamily: 'monospace', fontSize: _fontSize),
                   decoration: InputDecoration(
-                    hintText: _isConnected ? 'Enter bash command or coding agent task...' : 'Connect to execute commands',
+                    hintText: _isConnected
+                        ? 'Enter bash command or coding agent task...'
+                        : 'Or type: connect <host> <port> <username>',
                     hintStyle: const TextStyle(color: Colors.grey),
                     border: const OutlineInputBorder(),
                     isDense: true,
@@ -695,26 +951,49 @@ class _DashboardScreenState extends State<DashboardScreen> with SingleTickerProv
                     fillColor: const Color(0xFF1E293B),
                   ),
                   onSubmitted: (value) {
-                    _executeCommand(value);
+                    _handleTerminalInput(value);
                     _commandController.clear();
                   },
                 ),
               ),
               const SizedBox(width: 8),
-              ElevatedButton(
-                onPressed: _isConnected
-                    ? () {
-                        _executeCommand(_commandController.text);
-                        _commandController.clear();
-                      }
-                    : null,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF38BDF8),
-                  foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              if (!_isConnected)
+                ElevatedButton.icon(
+                  onPressed: _isConnecting
+                      ? null
+                      : () {
+                          final command = _commandController.text.trim();
+                          if (command.isEmpty) {
+                            _connect();
+                          } else {
+                            _handleTerminalInput(command);
+                            _commandController.clear();
+                          }
+                        },
+                  icon: const Icon(Icons.login, size: 18),
+                  label: const Text('Connect'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0284C7),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 12),
+                  ),
+                )
+              else
+                ElevatedButton(
+                  onPressed: () {
+                    _executeCommand(_commandController.text);
+                    _commandController.clear();
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF38BDF8),
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                  ),
+                  child: const Text('Send',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
-                child: const Text('Send', style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
             ],
           ),
         ],

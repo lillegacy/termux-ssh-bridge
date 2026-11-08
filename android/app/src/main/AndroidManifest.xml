@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Required in release builds for SSH connections over Tailscale. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
     <application
         android:label="termux_ssh_bridge"
         android:name="${applicationName}"
