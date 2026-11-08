@@ -1,9 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'command_policy.dart';
+import 'gateway_api_server.dart';
 
 void main() {
   runApp(const TermuxSshBridgeApp());
@@ -94,8 +100,12 @@ class _DashboardScreenState extends State<DashboardScreen>
   // Command & Terminal Controllers
   final _commandController = TextEditingController();
   final _scrollController = ScrollController();
+  final _apiTokenController = TextEditingController();
+  final _apiAllowlistController = TextEditingController();
 
   final _secureStorage = const FlutterSecureStorage();
+  static const _apiTokenKey = 'gateway_api_token';
+  static const _defaultAllowlist = 'ls\ncat\npwd\nwhoami\nuname\nuptime\ndf\ngit status\ngit diff';
 
   SSHClient? _client;
   bool _isConnected = false;
@@ -105,6 +115,11 @@ class _DashboardScreenState extends State<DashboardScreen>
   final List<LogEntry> _logs = [];
   List<SSHProfile> _profiles = [];
   String? _activeProfileId;
+
+  GatewayApiServer? _apiServer;
+  bool _apiRunning = false;
+  bool _apiAllowLan = false;
+  String _apiError = '';
 
   // Custom Quick Command Macros
   List<Map<String, String>> _quickCommands = [
@@ -128,7 +143,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _loadSavedData();
   }
 
@@ -165,7 +180,200 @@ class _DashboardScreenState extends State<DashboardScreen>
       });
     }
 
+    _apiAllowLan = prefs.getBool('gateway_allow_lan') ?? false;
+    final savedAllowlist = prefs.getString('gateway_allowlist');
+    _apiAllowlistController.text =
+        savedAllowlist == null || savedAllowlist.trim().isEmpty
+            ? _defaultAllowlist
+            : savedAllowlist;
+
+    var apiToken = await _secureStorage.read(key: _apiTokenKey);
+    if (apiToken == null || apiToken.isEmpty) {
+      apiToken = _generateApiToken();
+      await _secureStorage.write(key: _apiTokenKey, value: apiToken);
+    }
+    _apiTokenController.text = apiToken;
+
     _addLog('Loaded profiles and preferences.', color: Colors.cyanAccent);
+    await _startApiServer();
+  }
+
+  String _generateApiToken() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
+  Future<void> _startApiServer() async {
+    if (_apiRunning) return;
+    try {
+      final server = GatewayApiServer(
+        token: _apiTokenController.text.trim(),
+        commandPolicy: CommandPolicy(
+          _apiAllowlistController.text.split('\n'),
+        ),
+        allowLan: _apiAllowLan,
+        healthCallback: () async => GatewayHealth(
+          connected: _isConnected,
+          connecting: _isConnecting,
+          activeProfile: _activeProfileId,
+        ),
+        connectCallback: _apiConnect,
+        executeCallback: _apiExecute,
+        disconnectCallback: _disconnect,
+      );
+      await server.start();
+      if (!mounted) {
+        await server.stop();
+        return;
+      }
+      setState(() {
+        _apiServer = server;
+        _apiRunning = true;
+        _apiError = '';
+      });
+      _addLog(
+        'Gateway API listening on ${_apiAllowLan ? '0.0.0.0' : '127.0.0.1'}:8765.',
+        color: Colors.greenAccent,
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() => _apiError = error.toString());
+      }
+      _addLog('Gateway API failed to start: $error', color: Colors.redAccent);
+    }
+  }
+
+  Future<void> _stopApiServer() async {
+    await _apiServer?.stop();
+    if (mounted) {
+      setState(() {
+        _apiServer = null;
+        _apiRunning = false;
+      });
+    }
+  }
+
+  Future<void> _restartApiServer() async {
+    await _stopApiServer();
+    await _startApiServer();
+  }
+
+  Future<void> _saveApiSettings() async {
+    final token = _apiTokenController.text.trim();
+    if (token.isEmpty) {
+      setState(() => _apiError = 'The bearer token cannot be empty.');
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('gateway_allow_lan', _apiAllowLan);
+    await prefs.setString('gateway_allowlist', _apiAllowlistController.text);
+    await _secureStorage.write(key: _apiTokenKey, value: token);
+    await _restartApiServer();
+    if (mounted) {
+      setState(() => _apiError = '');
+      _addLog('Gateway API settings saved.', color: Colors.greenAccent);
+    }
+  }
+
+  Future<void> _regenerateApiToken() async {
+    final token = _generateApiToken();
+    _apiTokenController.text = token;
+    await _saveApiSettings();
+  }
+
+  Future<void> _copyApiToken() async {
+    await Clipboard.setData(ClipboardData(text: _apiTokenController.text));
+    if (mounted) {
+      _addLog('Gateway API token copied to clipboard.',
+          color: Colors.cyanAccent);
+    }
+  }
+
+  Future<GatewayConnectResult> _apiConnect(
+    Map<String, dynamic> request,
+  ) async {
+    final requestedProfile = request['profile']?.toString().trim() ?? '';
+    final profile = _profiles.cast<SSHProfile?>().firstWhere(
+          (candidate) =>
+              candidate!.id == requestedProfile ||
+              candidate!.name.toLowerCase() == requestedProfile.toLowerCase(),
+          orElse: () => null,
+        );
+    if (profile == null) {
+      throw const GatewayApiException(
+        404,
+        'profile_not_found',
+        'No stored SSH profile matches the requested profile.',
+      );
+    }
+    if (_isConnecting) {
+      throw const GatewayApiException(
+        409,
+        'connection_in_progress',
+        'An SSH connection is already in progress.',
+      );
+    }
+
+    final password = await _secureStorage.read(
+      key: 'ssh_password_${profile.id}',
+    );
+    await _loadProfileToControllers(profile.id);
+    await _connectTo(
+      profile.host,
+      int.tryParse(profile.port) ?? 8022,
+      profile.username,
+      password ?? '',
+    );
+    return GatewayConnectResult(
+      connected: _isConnected,
+      profile: profile.name,
+      message: _isConnected ? null : 'SSH connection failed.',
+    );
+  }
+
+  Future<GatewayCommandResult> _apiExecute(String command) async {
+    if (_client == null || !_isConnected) {
+      throw const GatewayApiException(
+        409,
+        'not_connected',
+        'Connect to an SSH profile before executing a command.',
+      );
+    }
+
+    _addLog('\$ $command', color: const Color(0xFF38BDF8));
+    final stdout = StringBuffer();
+    final stderr = StringBuffer();
+    try {
+      final session = await _client!.execute(command);
+      session.stdout.listen((data) {
+        final output = String.fromCharCodes(data);
+        stdout.write(output);
+        final trimmed = output.trimRight();
+        if (trimmed.isNotEmpty) _addLog(trimmed);
+      });
+      session.stderr.listen((data) {
+        final output = String.fromCharCodes(data);
+        stderr.write(output);
+        final trimmed = output.trimRight();
+        if (trimmed.isNotEmpty) {
+          _addLog(trimmed, color: Colors.redAccent);
+        }
+      });
+      await session.done;
+      final exitCode = session.exitCode ?? 0;
+      if (exitCode != 0) {
+        _addLog('[Process exited with code $exitCode]',
+            color: Colors.orangeAccent);
+      }
+      return GatewayCommandResult(
+        stdout: stdout.toString(),
+        stderr: stderr.toString(),
+        exitCode: exitCode,
+      );
+    } catch (error) {
+      throw GatewayApiException(500, 'execution_failed', error.toString());
+    }
   }
 
   Future<void> _loadProfileToControllers(String profileId) async {
