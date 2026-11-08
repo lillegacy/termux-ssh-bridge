@@ -105,7 +105,8 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   final _secureStorage = const FlutterSecureStorage();
   static const _apiTokenKey = 'gateway_api_token';
-  static const _defaultAllowlist = 'ls\ncat\npwd\nwhoami\nuname\nuptime\ndf\ngit status\ngit diff';
+  static const _defaultAllowlist =
+      'ls\ncat\npwd\nwhoami\nuname\nuptime\ndf\ngit status\ngit diff';
 
   SSHClient? _client;
   bool _isConnected = false;
@@ -297,7 +298,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     final profile = _profiles.cast<SSHProfile?>().firstWhere(
           (candidate) =>
               candidate!.id == requestedProfile ||
-              candidate!.name.toLowerCase() == requestedProfile.toLowerCase(),
+              candidate.name.toLowerCase() == requestedProfile.toLowerCase(),
           orElse: () => null,
         );
     if (profile == null) {
@@ -344,6 +345,8 @@ class _DashboardScreenState extends State<DashboardScreen>
     _addLog('\$ $command', color: const Color(0xFF38BDF8));
     final stdout = StringBuffer();
     final stderr = StringBuffer();
+    final stdoutComplete = Completer<void>();
+    final stderrComplete = Completer<void>();
     try {
       final session = await _client!.execute(command);
       session.stdout.listen((data) {
@@ -351,7 +354,7 @@ class _DashboardScreenState extends State<DashboardScreen>
         stdout.write(output);
         final trimmed = output.trimRight();
         if (trimmed.isNotEmpty) _addLog(trimmed);
-      });
+      }, onDone: stdoutComplete.complete);
       session.stderr.listen((data) {
         final output = String.fromCharCodes(data);
         stderr.write(output);
@@ -359,8 +362,9 @@ class _DashboardScreenState extends State<DashboardScreen>
         if (trimmed.isNotEmpty) {
           _addLog(trimmed, color: Colors.redAccent);
         }
-      });
+      }, onDone: stderrComplete.complete);
       await session.done;
+      await Future.wait([stdoutComplete.future, stderrComplete.future]);
       final exitCode = session.exitCode ?? 0;
       if (exitCode != 0) {
         _addLog('[Process exited with code $exitCode]',
@@ -757,6 +761,9 @@ class _DashboardScreenState extends State<DashboardScreen>
     _passwordController.dispose();
     _commandController.dispose();
     _scrollController.dispose();
+    _apiTokenController.dispose();
+    _apiAllowlistController.dispose();
+    unawaited(_apiServer?.stop());
     _client?.close();
     super.dispose();
   }
@@ -833,6 +840,7 @@ class _DashboardScreenState extends State<DashboardScreen>
             Tab(icon: Icon(Icons.settings, size: 18), text: 'Profiles'),
             Tab(icon: Icon(Icons.bolt, size: 18), text: 'Macros'),
             Tab(icon: Icon(Icons.computer, size: 18), text: 'Terminal'),
+            Tab(icon: Icon(Icons.api, size: 18), text: 'API'),
           ],
         ),
       ),
@@ -842,6 +850,7 @@ class _DashboardScreenState extends State<DashboardScreen>
           _buildProfilesAndConnectionTab(),
           _buildMacrosTab(),
           _buildTerminalTab(),
+          _buildApiTab(),
         ],
       ),
     );
@@ -1088,6 +1097,194 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildApiTab() {
+    final endpoint =
+        _apiAllowLan ? 'http://<phone-LAN-IP>:8765' : 'http://127.0.0.1:8765';
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Card(
+          elevation: 3,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Text(
+                      'Gateway API',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                    const Spacer(),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: _apiRunning
+                            ? Colors.green.withOpacity(0.2)
+                            : Colors.red.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        _apiRunning ? 'RUNNING' : 'STOPPED',
+                        style: TextStyle(
+                          color: _apiRunning
+                              ? Colors.greenAccent
+                              : Colors.redAccent,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text('Endpoint: $endpoint'),
+                const SizedBox(height: 6),
+                Text(
+                  _apiAllowLan
+                      ? 'LAN access is enabled. Only use this on a trusted network.'
+                      : 'Loopback-only mode. Enable LAN access to reach it from another device.',
+                  style: const TextStyle(color: Colors.grey, fontSize: 12),
+                ),
+                if (_apiError.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _apiError,
+                    style: const TextStyle(color: Colors.redAccent),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed:
+                            _apiRunning ? _stopApiServer : _startApiServer,
+                        icon: Icon(
+                          _apiRunning ? Icons.stop : Icons.play_arrow,
+                          size: 18,
+                        ),
+                        label: Text(_apiRunning ? 'Stop' : 'Start'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _saveApiSettings,
+                        icon: const Icon(Icons.save, size: 18),
+                        label: const Text('Save'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        _buildApiAuthenticationCard(),
+        _buildApiPolicyCard(),
+      ],
+    );
+  }
+
+  Widget _buildApiAuthenticationCard() {
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Authentication',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _apiTokenController,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'Bearer token',
+                helperText: 'Send as: Authorization: Bearer <token>',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  tooltip: 'Copy token',
+                  onPressed: _copyApiToken,
+                  icon: const Icon(Icons.copy, size: 18),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _regenerateApiToken,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('Regenerate token'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildApiPolicyCard() {
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Access Policy',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'One allowed command prefix per line. Every shell segment in an API command must match the list.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Allow trusted LAN access'),
+              subtitle: const Text(
+                'Binds to 0.0.0.0. The bearer token is still required.',
+              ),
+              value: _apiAllowLan,
+              onChanged: (value) {
+                setState(() => _apiAllowLan = value);
+              },
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _apiAllowlistController,
+              minLines: 7,
+              maxLines: 14,
+              style: const TextStyle(fontFamily: 'monospace'),
+              decoration: const InputDecoration(
+                labelText: 'Command allowlist',
+                border: OutlineInputBorder(),
+                alignLabelWithHint: true,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

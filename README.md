@@ -1,4 +1,4 @@
-# Termux SSH Bridge
+ # Termux SSH Bridge
 
 A secure Android ARM64 mobile application built with Flutter that acts as a secure SSH proxy and coding agent bridge to your Termux / PRoot environment over Tailscale.
 
@@ -8,7 +8,8 @@ A secure Android ARM64 mobile application built with Flutter that acts as a secu
 3. **Coding Agent & Termux Presets**: Quick action buttons for running diagnostics, PRoot info, disk usage, Tailscale status, git status, and Python agent tests.
 4. **Real-Time Terminal Console**: Interactive terminal log viewer displaying stdout, stderr, process exit codes, and custom bash command execution.
 5. **Android ARM64 & Android 12+ Optimized**: Built specifically for modern Android devices.
-6. **CI/CD Pipeline**: GitHub Actions workflow (`.github/workflows/build_apk.yml`) to automatically compile the release APK.
+6. **Gateway API**: Bearer-authenticated JSON endpoints for health checks, stored-profile connections, allowlisted command execution, and disconnects. The API shares the app's existing SSH session.
+7. **CI/CD Pipeline**: GitHub Actions workflow (`.github/workflows/build_apk.yml`) to automatically compile the release APK.
 
 ## Connecting from the Terminal tab
 
@@ -33,6 +34,25 @@ The status badge has three states:
 - **ONLINE**: SSH authentication succeeded.
 
 Make sure Tailscale is installed and connected on the Android device before connecting.
+
+## Gateway API
+
+Open the **API** tab to configure and start the local HTTP bridge. It listens on
+port `8765` and shares the app's existing SSH connection. Copy the generated
+bearer token from the API tab, then authenticate every request:
+
+```bash
+curl http://127.0.0.1:8765/health \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+The available endpoints are `GET /health`, `POST /connect`, `POST /execute`,
+and `POST /disconnect`. The server binds to loopback by default. LAN access is
+an explicit opt-in for trusted networks, and the bearer token remains required.
+Commands are restricted to the editable allowlist in the API tab.
+
+The full request and response format is documented in
+[`docs/API_CONTRACT.md`](docs/API_CONTRACT.md).
 
 ## Building the APK
 ```bash

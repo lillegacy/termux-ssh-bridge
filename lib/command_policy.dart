@@ -14,6 +14,7 @@ class CommandPolicy {
     // Substitution and redirection are disabled for the minimal API surface.
     if (trimmed.contains('`') ||
         trimmed.contains('\${') ||
+        trimmed.contains('\$(') ||
         trimmed.contains('>') ||
         trimmed.contains('<')) {
       return false;
@@ -41,6 +42,7 @@ class CommandPolicy {
     }
     if (trimmed.contains('`') ||
         trimmed.contains('\${') ||
+        trimmed.contains('\$(') ||
         trimmed.contains('>') ||
         trimmed.contains('<')) {
       reasons.add('Command substitution and redirection are not allowed.');
