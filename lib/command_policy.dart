@@ -49,14 +49,9 @@ class CommandPolicy {
         escaped = true;
         continue;
       }
-      if (quote == "'") {
+      if (quote.isNotEmpty) {
         current.write(character);
-        if (character == "'") quote = '';
-        continue;
-      }
-      if (quote == '"' && character == '"') {
-        current.write(character);
-        quote = '';
+        if (character == quote) quote = '';
         continue;
       }
       if (character == "'" || character == '"') {
