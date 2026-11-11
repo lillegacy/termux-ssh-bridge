@@ -613,6 +613,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     CloudDeviceClient client,
     CloudDeviceCommand command,
   ) async {
+    if (!mounted) return;
     final policy = CommandPolicy(_apiAllowlistController.text.split('\n'));
     final rejectedReasons = policy.rejectedReasons(command.command);
     if (rejectedReasons.isNotEmpty) {
@@ -702,6 +703,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   Future<void> _loadProfileToControllers(String profileId) async {
     final profile = _profiles.firstWhere((p) => p.id == profileId,
         orElse: () => _profiles.first);
+    if (!mounted) return;
     setState(() {
       _activeProfileId = profile.id;
       _hostController.text = profile.host;
@@ -857,6 +859,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     try {
       _client?.close();
     } catch (_) {}
+    if (!mounted) return;
     setState(() {
       _client = null;
       _isConnected = false;
@@ -1108,10 +1111,10 @@ class _DashboardScreenState extends State<DashboardScreen>
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
                 color: _isConnected
-                    ? Colors.green.withOpacity(0.2)
+                    ? Colors.green.withValues(alpha: 0.2)
                     : _isConnecting
-                        ? Colors.orange.withOpacity(0.2)
-                        : Colors.red.withOpacity(0.2),
+                        ? Colors.orange.withValues(alpha: 0.2)
+                        : Colors.red.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(
                   color: _isConnected
@@ -1211,7 +1214,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                 ),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
-                  value: _activeProfileId,
+                  initialValue: _activeProfileId,
                   decoration: const InputDecoration(
                       border: OutlineInputBorder(), isDense: true),
                   items: _profiles
@@ -1459,8 +1462,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                       ),
                       decoration: BoxDecoration(
                         color: _apiRunning
-                            ? Colors.green.withOpacity(0.2)
-                            : Colors.red.withOpacity(0.2),
+                            ? Colors.green.withValues(alpha: 0.2)
+                            : Colors.red.withValues(alpha: 0.2),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Text(
@@ -1576,7 +1579,7 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
-              value: selectedProfileIsValid ? _cloudProfileId : null,
+              initialValue: selectedProfileIsValid ? _cloudProfileId : null,
               decoration: const InputDecoration(
                 labelText: 'SSH profile for cloud commands',
                 border: OutlineInputBorder(),
