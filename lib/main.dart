@@ -114,7 +114,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   static const _apiTokenKey = 'gateway_api_token';
   static const _cloudDeviceKey = 'cloud_device_key';
   static const _defaultAllowlist =
-      'ls\ncat\npwd\nwhoami\nuname\nuptime\ndf\ngit status\ngit diff';
+      'ls\ncat\npwd\nwhoami\nuname\nuptime\ndf\ngit status\ngit diff\npython3\npip\nproot\ntailscale\necho';
 
   SSHClient? _client;
   bool _isConnected = false;
