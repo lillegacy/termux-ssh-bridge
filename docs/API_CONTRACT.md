@@ -138,3 +138,22 @@ remains mandatory, but plain HTTP does not encrypt traffic; use an SSH tunnel
 or HTTPS reverse proxy when confidentiality is required.
 
 The request body limit is 1 MiB.
+
+## Webapp cloud command queue
+
+The local Gateway API is not the connection used by the hosted webapp. To
+avoid requiring the browser to reach the phone over plain HTTP, pair the phone
+with the webapp from the app's **API** tab:
+
+1. In the webapp, open **Devices** and create a one-time pairing code.
+2. In the phone app, enter the HTTPS webapp URL, pairing code, and saved SSH
+   profile to use for cloud commands.
+3. Keep the phone app open. It polls `/api/public/device/poll` every five
+   seconds over HTTPS, executes allowed commands through the selected SSH
+   profile, and reports output to `/api/public/device/result`.
+
+The device key returned by `/api/public/device/pair` is kept in encrypted
+device storage. The phone enforces the API tab command allowlist for cloud
+commands too, and reports disallowed commands as `rejected`. The webapp API
+bearing the device key is separate from the local Gateway API bearer token.
+Unlink from the app or the webapp's Devices page to revoke the cloud key.

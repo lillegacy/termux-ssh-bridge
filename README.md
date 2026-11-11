@@ -1,6 +1,6 @@
  # Termux SSH Bridge
 
-A secure Android ARM64 mobile application built with Flutter that acts as a secure SSH proxy and coding agent bridge to your Termux / PRoot environment over Tailscale.
+A secure Android ARM64 Flutter app that bridges a webapp to Termux / PRoot over local SSH or Tailscale.
 
 ## Features
 1. **Tailscale SSH Configuration**: Input fields for Tailscale IP, Port, Username, and Password/SSH Key with secure persistence (`flutter_secure_storage` & `shared_preferences`).
@@ -9,7 +9,8 @@ A secure Android ARM64 mobile application built with Flutter that acts as a secu
 4. **Real-Time Terminal Console**: Interactive terminal log viewer displaying stdout, stderr, process exit codes, and custom bash command execution.
 5. **Android ARM64 & Android 12+ Optimized**: Built specifically for modern Android devices.
 6. **Gateway API**: Bearer-authenticated JSON endpoints for health checks, stored-profile connections, allowlisted command execution, and disconnects. The API shares the app's existing SSH session.
-7. **CI/CD Pipeline**: GitHub Actions workflow (`.github/workflows/build_apk.yml`) to automatically compile the release APK.
+7. **Webapp Cloud Queue**: The phone can pair with the webapp and poll for queued commands over HTTPS, then run allowed commands through a saved SSH profile and report results. This works without exposing the phone API to the internet.
+8. **CI/CD Pipeline**: GitHub Actions workflow (`.github/workflows/build_apk.yml`) to automatically compile the release APK.
 
 ## Connecting from the Terminal tab
 
@@ -34,6 +35,28 @@ The status badge has three states:
 - **ONLINE**: SSH authentication succeeded.
 
 Make sure Tailscale is installed and connected on the Android device before connecting.
+
+For Termux running on the same phone, use host `127.0.0.1` and the SSH server's
+port (commonly `8022`) in the saved profile; Tailscale is not needed for this
+local SSH connection.
+
+## Connecting from the hosted webapp
+
+The **API** tab includes a **Webapp Cloud Connection** section. In the webapp,
+open **Devices**, choose **Add device**, and enter the displayed six-character
+code in the phone app along with the HTTPS webapp URL and the saved SSH profile
+to use. The phone stores the returned device key in encrypted storage, then
+checks in to the webapp every few seconds and reports command results.
+
+Keep the phone app open while using the cloud command queue. Commands are
+checked against the API tab's allowlist before execution; disallowed commands
+are reported as rejected. The phone initiates the HTTPS connection, so the
+webapp does not need to connect directly to the phone and browser mixed-content
+restrictions do not apply.
+
+The cloud device key is separate from the local Gateway API bearer token. Do
+not share either token. Unlink the device from the API tab or the webapp
+Devices page to revoke its cloud key.
 
 ## Gateway API
 

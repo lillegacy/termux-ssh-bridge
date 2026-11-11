@@ -26,6 +26,18 @@ void main() {
       expect(policy.isAllowed('ls > output.txt'), isFalse);
       expect(policy.isAllowed('cat < input.txt'), isFalse);
       expect(policy.isAllowed('ls `whoami`'), isFalse);
+      expect(policy.isAllowed(r'echo $PATH'), isFalse);
+    });
+
+    test('rejects shell control characters and newlines', () {
+      expect(policy.isAllowed('git status\nrm -rf /'), isFalse);
+      expect(policy.isAllowed('git status\r\nrm -rf /'), isFalse);
+      expect(policy.isAllowed('git status\rm -rf /'), isFalse);
+    });
+
+    test('treats operators inside quoted arguments as literal text', () {
+      expect(policy.isAllowed('cat "left && right"'), isTrue);
+      expect(policy.isAllowed("cat 'left; right'"), isTrue);
     });
   });
 }

@@ -9,6 +9,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'command_policy.dart';
+import 'cloud_device_client.dart';
 import 'gateway_api_server.dart';
 
 void main() {
@@ -72,12 +73,14 @@ class SSHProfile {
       };
 
   factory SSHProfile.fromJson(Map<String, dynamic> json) => SSHProfile(
-        id: json['id'],
-        name: json['name'],
-        host: json['host'],
-        port: json['port'],
-        username: json['username'],
+        id: json['id']?.toString() ?? '',
+        name: json['name']?.toString() ?? '',
+        host: json['host']?.toString() ?? '',
+        port: json['port']?.toString() ?? '',
+        username: json['username']?.toString() ?? '',
       );
+
+  bool get isValid => id.isNotEmpty && name.isNotEmpty;
 }
 
 class DashboardScreen extends StatefulWidget {
@@ -88,7 +91,7 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabController;
 
   // Connection Controllers
@@ -102,9 +105,14 @@ class _DashboardScreenState extends State<DashboardScreen>
   final _scrollController = ScrollController();
   final _apiTokenController = TextEditingController();
   final _apiAllowlistController = TextEditingController();
+  final _cloudWebappUrlController = TextEditingController();
+  final _cloudPairingCodeController = TextEditingController();
+  final _cloudDeviceNameController =
+      TextEditingController(text: 'Termux phone');
 
   final _secureStorage = const FlutterSecureStorage();
   static const _apiTokenKey = 'gateway_api_token';
+  static const _cloudDeviceKey = 'cloud_device_key';
   static const _defaultAllowlist =
       'ls\ncat\npwd\nwhoami\nuname\nuptime\ndf\ngit status\ngit diff';
 
@@ -121,6 +129,13 @@ class _DashboardScreenState extends State<DashboardScreen>
   bool _apiRunning = false;
   bool _apiAllowLan = false;
   String _apiError = '';
+  String? _cloudKey;
+  String? _cloudProfileId;
+  String _cloudStatus = 'Not paired';
+  String _cloudError = '';
+  bool _cloudPairing = false;
+  bool _cloudPollInProgress = false;
+  Timer? _cloudPollTimer;
 
   // Custom Quick Command Macros
   List<Map<String, String>> _quickCommands = [
@@ -144,8 +159,22 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(length: 4, vsync: this);
     _loadSavedData();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (_cloudKey != null) _startCloudPolling();
+    } else {
+      _cloudPollTimer?.cancel();
+      _cloudPollTimer = null;
+      if (mounted && _cloudKey != null) {
+        setState(() => _cloudStatus = 'Paused while app is in background');
+      }
+    }
   }
 
   Future<void> _loadSavedData() async {
@@ -153,12 +182,23 @@ class _DashboardScreenState extends State<DashboardScreen>
 
     final profilesJson = prefs.getStringList('ssh_profiles');
     if (profilesJson != null && profilesJson.isNotEmpty) {
-      setState(() {
-        _profiles = profilesJson
-            .map((p) => SSHProfile.fromJson(jsonDecode(p)))
-            .toList();
-      });
-    } else {
+      final savedProfiles = <SSHProfile>[];
+      for (final encodedProfile in profilesJson) {
+        try {
+          final decoded = jsonDecode(encodedProfile);
+          if (decoded is Map<String, dynamic>) {
+            final profile = SSHProfile.fromJson(decoded);
+            if (profile.isValid) savedProfiles.add(profile);
+          }
+        } on FormatException {
+          // Ignore one corrupt profile instead of preventing the app from starting.
+        }
+      }
+      if (savedProfiles.isNotEmpty) {
+        setState(() => _profiles = savedProfiles);
+      }
+    }
+    if (_profiles.isEmpty) {
       _profiles = [
         SSHProfile(
             id: 'default',
@@ -171,14 +211,30 @@ class _DashboardScreenState extends State<DashboardScreen>
     _activeProfileId =
         prefs.getString('active_profile_id') ?? _profiles.first.id;
     _loadProfileToControllers(_activeProfileId!);
+    _cloudWebappUrlController.text = prefs.getString('cloud_webapp_url') ?? '';
+    _cloudProfileId =
+        prefs.getString('cloud_ssh_profile_id') ?? _activeProfileId;
 
     final customCmdsJson = prefs.getStringList('custom_quick_cmds');
     if (customCmdsJson != null && customCmdsJson.isNotEmpty) {
-      setState(() {
-        _quickCommands = customCmdsJson
-            .map((c) => Map<String, String>.from(jsonDecode(c)))
-            .toList();
-      });
+      final savedCommands = <Map<String, String>>[];
+      for (final encodedCommand in customCmdsJson) {
+        try {
+          final decoded = jsonDecode(encodedCommand);
+          if (decoded is Map<String, dynamic>) {
+            final name = decoded['name']?.toString() ?? '';
+            final command = decoded['cmd']?.toString() ?? '';
+            if (name.isNotEmpty && command.isNotEmpty) {
+              savedCommands.add({'name': name, 'cmd': command});
+            }
+          }
+        } on FormatException {
+          // Ignore one corrupt macro instead of preventing the app from starting.
+        }
+      }
+      if (savedCommands.isNotEmpty) {
+        setState(() => _quickCommands = savedCommands);
+      }
     }
 
     _apiAllowLan = prefs.getBool('gateway_allow_lan') ?? false;
@@ -197,6 +253,14 @@ class _DashboardScreenState extends State<DashboardScreen>
 
     _addLog('Loaded profiles and preferences.', color: Colors.cyanAccent);
     await _startApiServer();
+
+    _cloudKey = await _secureStorage.read(key: _cloudDeviceKey);
+    if (mounted &&
+        _cloudKey != null &&
+        _cloudWebappUrlController.text.isNotEmpty) {
+      setState(() => _cloudStatus = 'Starting');
+      _startCloudPolling();
+    }
   }
 
   String _generateApiToken() {
@@ -380,6 +444,261 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
   }
 
+  Future<void> _pairCloudDevice() async {
+    final baseUrl = _cloudWebappUrlController.text.trim();
+    final code = _cloudPairingCodeController.text.trim();
+    final name = _cloudDeviceNameController.text.trim();
+    if (baseUrl.isEmpty || !RegExp(r'^[A-Za-z0-9]{6}$').hasMatch(code)) {
+      setState(() {
+        _cloudError =
+            'Enter your webapp URL and the six-character pairing code.';
+      });
+      return;
+    }
+    if (name.isEmpty || name.length > 60) {
+      setState(() =>
+          _cloudError = 'Device name must be between 1 and 60 characters.');
+      return;
+    }
+    if (_cloudProfileId == null ||
+        !_profiles.any((profile) => profile.id == _cloudProfileId)) {
+      setState(
+          () => _cloudError = 'Select a saved SSH profile for cloud commands.');
+      return;
+    }
+
+    setState(() {
+      _cloudPairing = true;
+      _cloudError = '';
+      _cloudStatus = 'Pairing';
+    });
+    try {
+      final paired = await CloudDeviceClient.pair(
+        baseUrl: baseUrl,
+        code: code,
+        name: name,
+      );
+      await _secureStorage.write(key: _cloudDeviceKey, value: paired.deviceKey);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('cloud_webapp_url', baseUrl);
+      await prefs.setString('cloud_ssh_profile_id', _cloudProfileId!);
+      if (!mounted) return;
+      _cloudPairingCodeController.clear();
+      setState(() {
+        _cloudKey = paired.deviceKey;
+        _cloudStatus = 'Paired';
+        _cloudError = '';
+      });
+      _addLog('Paired with the webapp command queue.',
+          color: Colors.greenAccent);
+      _startCloudPolling();
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _cloudStatus = 'Pairing failed';
+          _cloudError = error.toString();
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _cloudPairing = false);
+    }
+  }
+
+  Future<void> _unlinkCloudDevice() async {
+    final key = _cloudKey;
+    if (key == null) return;
+
+    _cloudPollTimer?.cancel();
+    _cloudPollTimer = null;
+    final client = CloudDeviceClient(
+      baseUrl: _cloudWebappUrlController.text.trim(),
+      deviceKey: key,
+    );
+    try {
+      await client.unlink();
+      await _secureStorage.delete(key: _cloudDeviceKey);
+      if (!mounted) return;
+      setState(() {
+        _cloudKey = null;
+        _cloudStatus = 'Not paired';
+        _cloudError = '';
+      });
+      _addLog('Unlinked the cloud device.', color: Colors.orangeAccent);
+    } catch (error) {
+      if (error is CloudDeviceException &&
+          (error.statusCode == 401 || error.statusCode == 404)) {
+        await _secureStorage.delete(key: _cloudDeviceKey);
+        if (mounted) {
+          setState(() {
+            _cloudKey = null;
+            _cloudStatus = 'Not paired';
+            _cloudError = '';
+          });
+        }
+        return;
+      }
+      if (mounted) {
+        setState(() {
+          _cloudStatus = 'Unlink failed';
+          _cloudError = error.toString();
+        });
+        _startCloudPolling();
+      }
+    } finally {
+      client.close();
+    }
+  }
+
+  void _startCloudPolling() {
+    if (_cloudKey == null ||
+        _cloudPollTimer != null ||
+        !mounted ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+      return;
+    }
+    _cloudPollTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => unawaited(_pollCloudCommands()),
+    );
+    unawaited(_pollCloudCommands());
+  }
+
+  Future<void> _pollCloudCommands() async {
+    final key = _cloudKey;
+    final baseUrl = _cloudWebappUrlController.text.trim();
+    if (key == null || baseUrl.isEmpty || _cloudPollInProgress || !mounted) {
+      return;
+    }
+
+    _cloudPollInProgress = true;
+    final client = CloudDeviceClient(baseUrl: baseUrl, deviceKey: key);
+    try {
+      final commands = await client.poll();
+      if (!mounted) return;
+      setState(() {
+        _cloudStatus = 'Online';
+        _cloudError = '';
+      });
+      for (final command in commands) {
+        if (!mounted || key != _cloudKey) break;
+        await _processCloudCommand(client, command);
+      }
+    } catch (error) {
+      if (error is CloudDeviceException && error.statusCode == 401) {
+        _cloudPollTimer?.cancel();
+        _cloudPollTimer = null;
+        await _secureStorage.delete(key: _cloudDeviceKey);
+        if (mounted) {
+          setState(() {
+            _cloudKey = null;
+            _cloudStatus = 'Device key revoked';
+            _cloudError = 'This device was unlinked from the webapp.';
+          });
+        }
+        return;
+      }
+      if (mounted) {
+        setState(() {
+          _cloudStatus = 'Connection error';
+          _cloudError = error.toString();
+        });
+      }
+    } finally {
+      client.close();
+      _cloudPollInProgress = false;
+    }
+  }
+
+  Future<void> _processCloudCommand(
+    CloudDeviceClient client,
+    CloudDeviceCommand command,
+  ) async {
+    final policy = CommandPolicy(_apiAllowlistController.text.split('\n'));
+    final rejectedReasons = policy.rejectedReasons(command.command);
+    if (rejectedReasons.isNotEmpty) {
+      final message = rejectedReasons.join(' ');
+      try {
+        await client.reportResult(
+          commandId: command.id,
+          status: CloudCommandStatus.rejected,
+          output: message,
+        );
+        _addLog('Cloud command rejected by policy: ${command.command}',
+            color: Colors.orangeAccent);
+      } catch (error) {
+        if (mounted) {
+          setState(() {
+            _cloudStatus = 'Result reporting failed';
+            _cloudError = error.toString();
+          });
+        }
+      }
+      return;
+    }
+
+    var status = CloudCommandStatus.failed;
+    var output = '';
+    var exitCode = 1;
+    try {
+      final selectedProfileId = _cloudProfileId;
+      if (selectedProfileId == null ||
+          !_profiles.any((profile) => profile.id == selectedProfileId)) {
+        throw const FormatException(
+            'Select a saved SSH profile for cloud commands.');
+      }
+
+      if (_isConnected && _activeProfileId != selectedProfileId) {
+        await _disconnect();
+      }
+      if (!_isConnected) {
+        final connection = await _apiConnect({'profile': selectedProfileId});
+        if (!connection.connected) {
+          throw GatewayApiException(
+            502,
+            'ssh_connection_failed',
+            connection.message ??
+                'Could not connect to the selected SSH profile.',
+          );
+        }
+      }
+
+      final result = await _apiExecute(command.command);
+      status = result.exitCode == 0
+          ? CloudCommandStatus.done
+          : CloudCommandStatus.failed;
+      output = [
+        if (result.stdout.isNotEmpty) 'STDOUT:\n${result.stdout}',
+        if (result.stderr.isNotEmpty) 'STDERR:\n${result.stderr}',
+      ].join('\n\n');
+      exitCode = result.exitCode;
+    } catch (error) {
+      output = error.toString();
+    }
+
+    try {
+      await client.reportResult(
+        commandId: command.id,
+        status: status,
+        output: output,
+        exitCode: exitCode,
+      );
+      if (status == CloudCommandStatus.done) {
+        _addLog('Cloud command completed: ${command.command}',
+            color: Colors.greenAccent);
+      } else {
+        _addLog('Cloud command failed: ${command.command} — $output',
+            color: Colors.redAccent);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _cloudStatus = 'Result reporting failed';
+          _cloudError = error.toString();
+        });
+      }
+    }
+  }
+
   Future<void> _loadProfileToControllers(String profileId) async {
     final profile = _profiles.firstWhere((p) => p.id == profileId,
         orElse: () => _profiles.first);
@@ -426,6 +745,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 
   void _addLog(String text, {Color color = Colors.white}) {
+    if (!mounted) return;
     setState(() {
       _logs.add(LogEntry(text, color: color));
     });
@@ -754,6 +1074,8 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _cloudPollTimer?.cancel();
     _tabController.dispose();
     _hostController.dispose();
     _portController.dispose();
@@ -763,6 +1085,9 @@ class _DashboardScreenState extends State<DashboardScreen>
     _scrollController.dispose();
     _apiTokenController.dispose();
     _apiAllowlistController.dispose();
+    _cloudWebappUrlController.dispose();
+    _cloudPairingCodeController.dispose();
+    _cloudDeviceNameController.dispose();
     unawaited(_apiServer?.stop());
     _client?.close();
     super.dispose();
@@ -1197,7 +1522,144 @@ class _DashboardScreenState extends State<DashboardScreen>
         ),
         _buildApiAuthenticationCard(),
         _buildApiPolicyCard(),
+        _buildCloudDeviceCard(),
       ],
+    );
+  }
+
+  Widget _buildCloudDeviceCard() {
+    final paired = _cloudKey != null;
+    final selectedProfileIsValid =
+        _profiles.any((profile) => profile.id == _cloudProfileId);
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Webapp Cloud Connection',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
+                ),
+                Text(
+                  _cloudStatus.toUpperCase(),
+                  style: TextStyle(
+                    color: paired ? Colors.greenAccent : Colors.grey,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'The phone checks in to your HTTPS webapp and runs queued commands through the selected saved SSH profile. For Termux on this phone, set that profile host to 127.0.0.1 (usually port 8022). No inbound phone address, LAN access, or Tailscale connection from your browser is needed.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _cloudWebappUrlController,
+              enabled: !paired && !_cloudPairing,
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: 'Webapp URL',
+                hintText: 'https://your-project.lovable.app',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              value: selectedProfileIsValid ? _cloudProfileId : null,
+              decoration: const InputDecoration(
+                labelText: 'SSH profile for cloud commands',
+                border: OutlineInputBorder(),
+              ),
+              items: _profiles
+                  .map((profile) => DropdownMenuItem(
+                        value: profile.id,
+                        child: Text(profile.name),
+                      ))
+                  .toList(),
+              onChanged: _cloudPairing
+                  ? null
+                  : (profileId) async {
+                      if (profileId == null) return;
+                      final prefs = await SharedPreferences.getInstance();
+                      await prefs.setString('cloud_ssh_profile_id', profileId);
+                      if (mounted) setState(() => _cloudProfileId = profileId);
+                    },
+            ),
+            if (!paired) ...[
+              const SizedBox(height: 10),
+              TextField(
+                controller: _cloudDeviceNameController,
+                enabled: !_cloudPairing,
+                decoration: const InputDecoration(
+                  labelText: 'Device name',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _cloudPairingCodeController,
+                enabled: !_cloudPairing,
+                textCapitalization: TextCapitalization.characters,
+                maxLength: 6,
+                decoration: const InputDecoration(
+                  labelText: '6-character pairing code',
+                  helperText:
+                      'Generate this from Devices → Add device in the webapp.',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _cloudPairing ? null : _pairCloudDevice,
+                  icon: _cloudPairing
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.link),
+                  label:
+                      Text(_cloudPairing ? 'Pairing...' : 'Pair with webapp'),
+                ),
+              ),
+            ] else ...[
+              const SizedBox(height: 10),
+              const Text('Paired with the webapp command queue.'),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _cloudPollInProgress ? null : _unlinkCloudDevice,
+                icon: const Icon(Icons.link_off),
+                label: const Text('Unlink webapp device'),
+              ),
+            ],
+            if (_cloudError.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              SelectableText(
+                _cloudError,
+                style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+              ),
+            ],
+            const SizedBox(height: 8),
+            const Text(
+              'Keep this app open for command polling. Commands outside the API tab allowlist are rejected.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
