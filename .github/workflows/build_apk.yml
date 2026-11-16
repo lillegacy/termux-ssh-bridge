@@ -65,8 +65,19 @@ jobs:
 
       - name: Verify APK signing certificate
         run: |
-          keytool -printcert -jarfile build/app/outputs/flutter-apk/app-release.apk | head -25
-          echo "Expected SHA256: D5:42:FD:9D:C3:FF:B9:31:89:1E:65:FC:7A:E9:67:BF:62:63:9D:83:8B:00:BB:E1:13:7B:1C:BF:9C:BB:E2:43"
+          set -euo pipefail
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          EXPECTED="D5:42:FD:9D:C3:FF:B9:31:89:1E:65:FC:7A:E9:67:BF:62:63:9D:83:8B:00:BB:E1:13:7B:1C:BF:9C:BB:E2:43"
+          CERT=$(keytool -printcert -jarfile "$APK")
+          echo "$CERT" | grep -E "Owner:|Issuer:" || true
+          ACTUAL=$(echo "$CERT" | grep "SHA256:" | tr -d " " | cut -d: -f2-)
+          echo "Actual   SHA256: $ACTUAL"
+          echo "Expected SHA256: $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::APK signed with an unexpected certificate ($ACTUAL). Installed apps could not update in place."
+            exit 1
+          fi
+          echo "OK: APK signed with the stable release key."
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
