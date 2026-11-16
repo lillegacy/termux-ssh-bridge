@@ -180,15 +180,23 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_cloudKey == null) return;
     if (state == AppLifecycleState.resumed) {
-      if (_cloudKey != null) _startCloudPolling();
-    } else {
-      _cloudPollTimer?.cancel();
-      _cloudPollTimer = null;
-      if (mounted && _cloudKey != null) {
-        setState(() => _cloudStatus = 'Paused while app is in background');
-      }
+      _restartCloudPolling(const Duration(seconds: 5));
+      if (mounted) setState(() => _cloudStatus = 'Online');
+    } else if (state == AppLifecycleState.paused) {
+      // Keep reporting while backgrounded so the webapp still sees the device.
+      // Without a foreground service Android may eventually stop the isolate;
+      // slowing the poll keeps battery use down until Phase 2 adds a service.
+      _restartCloudPolling(const Duration(seconds: 30));
+      if (mounted) setState(() => _cloudStatus = 'Background (30s poll)');
     }
+  }
+
+  void _restartCloudPolling(Duration interval) {
+    _cloudPollTimer?.cancel();
+    _cloudPollTimer = null;
+    _startCloudPolling(interval: interval, requireForeground: false);
   }
 
   Future<void> _loadSavedData() async {
@@ -617,15 +625,19 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
   }
 
-  void _startCloudPolling() {
-    if (_cloudKey == null ||
-        _cloudPollTimer != null ||
-        !mounted ||
+  void _startCloudPolling({
+    Duration interval = const Duration(seconds: 5),
+    bool requireForeground = true,
+  }) {
+    if (_cloudKey == null || _cloudPollTimer != null || !mounted) {
+      return;
+    }
+    if (requireForeground &&
         WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
       return;
     }
     _cloudPollTimer = Timer.periodic(
-      const Duration(seconds: 5),
+      interval,
       (_) => unawaited(_pollCloudCommands()),
     );
     unawaited(_pollCloudCommands());
