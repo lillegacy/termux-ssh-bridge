@@ -1111,10 +1111,10 @@ class _DashboardScreenState extends State<DashboardScreen>
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
                 color: _isConnected
-                    ? Colors.green.withValues(alpha: 0.2)
+                    ? Colors.green.withOpacity(0.2)
                     : _isConnecting
-                        ? Colors.orange.withValues(alpha: 0.2)
-                        : Colors.red.withValues(alpha: 0.2),
+                        ? Colors.orange.withOpacity(0.2)
+                        : Colors.red.withOpacity(0.2),
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(
                   color: _isConnected
@@ -1214,7 +1214,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                 ),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
-                  initialValue: _activeProfileId,
+                  value: _activeProfileId,
                   decoration: const InputDecoration(
                       border: OutlineInputBorder(), isDense: true),
                   items: _profiles
@@ -1462,8 +1462,8 @@ class _DashboardScreenState extends State<DashboardScreen>
                       ),
                       decoration: BoxDecoration(
                         color: _apiRunning
-                            ? Colors.green.withValues(alpha: 0.2)
-                            : Colors.red.withValues(alpha: 0.2),
+                            ? Colors.green.withOpacity(0.2)
+                            : Colors.red.withOpacity(0.2),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Text(
@@ -1579,7 +1579,7 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
-              initialValue: selectedProfileIsValid ? _cloudProfileId : null,
+              value: selectedProfileIsValid ? _cloudProfileId : null,
               decoration: const InputDecoration(
                 labelText: 'SSH profile for cloud commands',
                 border: OutlineInputBorder(),
