@@ -8,6 +8,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'bridge_session.dart';
 import 'command_policy.dart';
 import 'cloud_device_client.dart';
 import 'gateway_api_server.dart';
@@ -104,7 +105,8 @@ class _DashboardScreenState extends State<DashboardScreen>
   final _commandController = TextEditingController();
   final _scrollController = ScrollController();
   final _apiTokenController = TextEditingController();
-  final _apiAllowlistController = TextEditingController();
+  final _apiBanListController = TextEditingController();
+  final _apiPinController = TextEditingController();
   final _cloudWebappUrlController = TextEditingController();
   final _cloudPairingCodeController = TextEditingController();
   final _cloudDeviceNameController =
@@ -112,9 +114,9 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   final _secureStorage = const FlutterSecureStorage();
   static const _apiTokenKey = 'gateway_api_token';
+  static const _bridgePinKey = 'gateway_bridge_pin';
   static const _cloudDeviceKey = 'cloud_device_key';
-  static const _defaultAllowlist =
-      'ls\ncat\npwd\nwhoami\nuname\nuptime\ndf\ngit status\ngit diff\npython3\npip\nproot\ntailscale\necho';
+  static const _defaultBanList = CommandPolicy.defaultBannedPatterns;
 
   SSHClient? _client;
   bool _isConnected = false;
@@ -129,6 +131,12 @@ class _DashboardScreenState extends State<DashboardScreen>
   bool _apiRunning = false;
   bool _apiAllowLan = false;
   String _apiError = '';
+  bool _apiPinVisible = false;
+  BridgeSession? _bridgeSession;
+  Timer? _bridgeTicker;
+  bool _bridgeIdleNotified = false;
+  int _bridgePinFailures = 0;
+  DateTime? _bridgePinLockedUntil;
   String? _cloudKey;
   String? _cloudProfileId;
   String _cloudStatus = 'Not paired';
@@ -238,11 +246,11 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
 
     _apiAllowLan = prefs.getBool('gateway_allow_lan') ?? false;
-    final savedAllowlist = prefs.getString('gateway_allowlist');
-    _apiAllowlistController.text =
-        savedAllowlist == null || savedAllowlist.trim().isEmpty
-            ? _defaultAllowlist
-            : savedAllowlist;
+    final savedBanList = prefs.getString('gateway_banlist');
+    _apiBanListController.text =
+        savedBanList == null || savedBanList.trim().isEmpty
+            ? _defaultBanList.join('\n')
+            : savedBanList;
 
     var apiToken = await _secureStorage.read(key: _apiTokenKey);
     if (apiToken == null || apiToken.isEmpty) {
@@ -250,6 +258,8 @@ class _DashboardScreenState extends State<DashboardScreen>
       await _secureStorage.write(key: _apiTokenKey, value: apiToken);
     }
     _apiTokenController.text = apiToken;
+    _apiPinController.text =
+        await _secureStorage.read(key: _bridgePinKey) ?? '';
 
     _addLog('Loaded profiles and preferences.', color: Colors.cyanAccent);
     await _startApiServer();
@@ -275,17 +285,19 @@ class _DashboardScreenState extends State<DashboardScreen>
       final server = GatewayApiServer(
         token: _apiTokenController.text.trim(),
         commandPolicy: CommandPolicy(
-          _apiAllowlistController.text.split('\n'),
+          _apiBanListController.text.split('\n'),
         ),
         allowLan: _apiAllowLan,
         healthCallback: () async => GatewayHealth(
           connected: _isConnected,
           connecting: _isConnecting,
           activeProfile: _activeProfileId,
+          bridge: _bridgeStatusJson(),
         ),
         connectCallback: _apiConnect,
         executeCallback: _apiExecute,
         disconnectCallback: _disconnect,
+        bridgeStatusCallback: () async => _bridgeStatusJson(),
       );
       await server.start();
       if (!mounted) {
@@ -332,8 +344,12 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('gateway_allow_lan', _apiAllowLan);
-    await prefs.setString('gateway_allowlist', _apiAllowlistController.text);
+    await prefs.setString('gateway_banlist', _apiBanListController.text);
     await _secureStorage.write(key: _apiTokenKey, value: token);
+    await _secureStorage.write(
+      key: _bridgePinKey,
+      value: _apiPinController.text.trim(),
+    );
     await _restartApiServer();
     if (mounted) {
       setState(() => _apiError = '');
@@ -380,6 +396,36 @@ class _DashboardScreenState extends State<DashboardScreen>
       );
     }
 
+    final storedPin =
+        (await _secureStorage.read(key: _bridgePinKey) ?? '').trim();
+    if (storedPin.isNotEmpty) {
+      final now = DateTime.now();
+      final lockedUntil = _bridgePinLockedUntil;
+      if (lockedUntil != null && now.isBefore(lockedUntil)) {
+        throw GatewayApiException(
+          429,
+          'pin_locked',
+          'Too many failed PIN attempts. Try again in '
+              '${lockedUntil.difference(now).inSeconds}s.',
+        );
+      }
+      final providedPin = request['pin']?.toString().trim() ?? '';
+      if (providedPin != storedPin) {
+        _bridgePinFailures++;
+        if (_bridgePinFailures >= 5) {
+          _bridgePinLockedUntil = now.add(const Duration(minutes: 1));
+          _bridgePinFailures = 0;
+        }
+        throw const GatewayApiException(
+          401,
+          'invalid_pin',
+          'The bridge PIN is incorrect.',
+        );
+      }
+      _bridgePinFailures = 0;
+      _bridgePinLockedUntil = null;
+    }
+
     final password = await _secureStorage.read(
       key: 'ssh_password_${profile.id}',
     );
@@ -390,10 +436,20 @@ class _DashboardScreenState extends State<DashboardScreen>
       profile.username,
       password ?? '',
     );
+    if (_isConnected) {
+      _startBridgeSession(profile);
+      return GatewayConnectResult(
+        connected: true,
+        profile: profile.name,
+        pinRequired: storedPin.isNotEmpty,
+        session: _bridgeStatusJson(),
+      );
+    }
     return GatewayConnectResult(
-      connected: _isConnected,
+      connected: false,
       profile: profile.name,
-      message: _isConnected ? null : 'SSH connection failed.',
+      pinRequired: storedPin.isNotEmpty,
+      message: 'SSH connection failed.',
     );
   }
 
@@ -406,6 +462,7 @@ class _DashboardScreenState extends State<DashboardScreen>
       );
     }
 
+    _bridgeSession?.recordActivity(DateTime.now());
     _addLog('\$ $command', color: const Color(0xFF38BDF8));
     final stdout = StringBuffer();
     final stderr = StringBuffer();
@@ -614,7 +671,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     CloudDeviceCommand command,
   ) async {
     if (!mounted) return;
-    final policy = CommandPolicy(_apiAllowlistController.text.split('\n'));
+    final policy = CommandPolicy(_apiBanListController.text.split('\n'));
     final rejectedReasons = policy.rejectedReasons(command.command);
     if (rejectedReasons.isNotEmpty) {
       final message = rejectedReasons.join(' ');
@@ -859,12 +916,73 @@ class _DashboardScreenState extends State<DashboardScreen>
     try {
       _client?.close();
     } catch (_) {}
+    _stopBridgeSession();
     if (!mounted) return;
     setState(() {
       _client = null;
       _isConnected = false;
     });
     _addLog('Disconnected from SSH server.', color: Colors.orangeAccent);
+  }
+
+  void _startBridgeSession(SSHProfile profile) {
+    _bridgeTicker?.cancel();
+    _bridgeIdleNotified = false;
+    _bridgeSession = BridgeSession(
+      profileId: profile.id,
+      profileName: profile.name,
+      connectedAt: DateTime.now(),
+    );
+    _bridgeTicker = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _evaluateBridgeIdle(),
+    );
+    _addLog(
+      'Bridge session ${_bridgeSession!.id.substring(0, 8)} opened for ${profile.name}.',
+      color: Colors.greenAccent,
+    );
+  }
+
+  void _stopBridgeSession() {
+    _bridgeTicker?.cancel();
+    _bridgeTicker = null;
+    _bridgeSession = null;
+    _bridgeIdleNotified = false;
+  }
+
+  void _evaluateBridgeIdle() {
+    final session = _bridgeSession;
+    if (session == null) {
+      _bridgeTicker?.cancel();
+      _bridgeTicker = null;
+      return;
+    }
+    final now = DateTime.now();
+    if (session.shouldAutoDisconnect(now)) {
+      _addLog(
+        'Bridge session idle for ${session.disconnectAfter.inMinutes} minutes; disconnecting.',
+        color: Colors.orangeAccent,
+      );
+      unawaited(_disconnect());
+      return;
+    }
+    final idle = session.isIdle(now);
+    if (idle != _bridgeIdleNotified) {
+      _bridgeIdleNotified = idle;
+      if (idle) {
+        _addLog(
+          'Bridge idle for ${session.idleAfter.inSeconds}s; heartbeat eased to 30s.',
+          color: Colors.blueGrey,
+        );
+      }
+      if (mounted) setState(() {});
+    }
+  }
+
+  Map<String, Object?>? _bridgeStatusJson() {
+    final session = _bridgeSession;
+    if (session == null || !_isConnected) return null;
+    return session.toJson(DateTime.now());
   }
 
   Future<String?> _promptForPassword(String host) async {
@@ -1079,6 +1197,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _cloudPollTimer?.cancel();
+    _bridgeTicker?.cancel();
     _tabController.dispose();
     _hostController.dispose();
     _portController.dispose();
@@ -1087,7 +1206,8 @@ class _DashboardScreenState extends State<DashboardScreen>
     _commandController.dispose();
     _scrollController.dispose();
     _apiTokenController.dispose();
-    _apiAllowlistController.dispose();
+    _apiBanListController.dispose();
+    _apiPinController.dispose();
     _cloudWebappUrlController.dispose();
     _cloudPairingCodeController.dispose();
     _cloudDeviceNameController.dispose();
@@ -1657,7 +1777,7 @@ class _DashboardScreenState extends State<DashboardScreen>
             ],
             const SizedBox(height: 8),
             const Text(
-              'Keep this app open for command polling. Commands outside the API tab allowlist are rejected.',
+              'Keep this app open for cloud command polling. Commands that match the ban list are rejected.',
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ],
@@ -1721,7 +1841,8 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
             const SizedBox(height: 4),
             const Text(
-              'One allowed command prefix per line. Every shell segment in an API command must match the list.',
+              'Ban list: one blocked command or pattern per line. Everything else runs '
+              'over the bridge. Lines starting with # are ignored.',
               style: TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 10),
@@ -1738,14 +1859,35 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
             const SizedBox(height: 8),
             TextField(
-              controller: _apiAllowlistController,
+              controller: _apiBanListController,
               minLines: 7,
               maxLines: 14,
               style: const TextStyle(fontFamily: 'monospace'),
               decoration: const InputDecoration(
-                labelText: 'Command allowlist',
+                labelText: 'Command ban list',
                 border: OutlineInputBorder(),
                 alignLabelWithHint: true,
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _apiPinController,
+              obscureText: !_apiPinVisible,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: 'Bridge PIN (optional)',
+                helperText:
+                    'Required by /bridge/connect when set. Leave empty to disable.',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  tooltip: _apiPinVisible ? 'Hide PIN' : 'Show PIN',
+                  onPressed: () =>
+                      setState(() => _apiPinVisible = !_apiPinVisible),
+                  icon: Icon(
+                    _apiPinVisible ? Icons.visibility_off : Icons.visibility,
+                    size: 18,
+                  ),
+                ),
               ),
             ),
           ],

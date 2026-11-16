@@ -14,7 +14,7 @@ void main() {
     disconnected = false;
     server = GatewayApiServer(
       token: 'test-secret',
-      commandPolicy: CommandPolicy(['echo', 'pwd']),
+      commandPolicy: CommandPolicy(['rm', 'sudo', 'shutdown']),
       port: 0,
       healthCallback: () async => const GatewayHealth(
         connected: true,
@@ -24,6 +24,12 @@ void main() {
       connectCallback: (request) async => GatewayConnectResult(
         connected: true,
         profile: request['profile']!.toString(),
+        pinRequired: true,
+        session: const {
+          'sessionId': 'abc',
+          'idle': false,
+          'heartbeatSeconds': 5,
+        },
       ),
       executeCallback: (command) async => GatewayCommandResult(
         stdout: 'ran: $command',
@@ -32,6 +38,11 @@ void main() {
       ),
       disconnectCallback: () async {
         disconnected = true;
+      },
+      bridgeStatusCallback: () async => const {
+        'sessionId': 'abc',
+        'idle': true,
+        'heartbeatSeconds': 30,
       },
     );
     await server.start();
@@ -104,7 +115,7 @@ void main() {
     expect(body['exitCode'], 0);
   });
 
-  test('rejects commands outside the allowlist', () async {
+  test('rejects banned commands', () async {
     final response = await send(
       'POST',
       '/execute',
@@ -114,6 +125,7 @@ void main() {
     expect(response.statusCode, HttpStatus.forbidden);
     final body = jsonDecode(await response.transform(utf8.decoder).join());
     expect(body['error']['code'], 'command_not_allowed');
+    expect(body['error']['message'], contains('rm'));
   });
 
   test('disconnects the shared SSH connection', () async {
@@ -124,5 +136,55 @@ void main() {
     );
     expect(response.statusCode, HttpStatus.ok);
     expect(disconnected, isTrue);
+  });
+
+  test('bridge connect returns session details and pin requirement', () async {
+    final response = await send(
+      'POST',
+      '/bridge/connect',
+      token: 'test-secret',
+      body: {'profile': 'test-profile', 'pin': '1234'},
+    );
+    expect(response.statusCode, HttpStatus.ok);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['connected'], isTrue);
+    expect(body['pinRequired'], isTrue);
+    expect(body['session']['sessionId'], 'abc');
+  });
+
+  test('bridge execute returns output plus session state', () async {
+    final response = await send(
+      'POST',
+      '/bridge/execute',
+      token: 'test-secret',
+      body: {'command': 'echo hello'},
+    );
+    expect(response.statusCode, HttpStatus.ok);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['stdout'], 'ran: echo hello');
+    expect(body['session']['idle'], isTrue);
+  });
+
+  test('bridge status reports the idle session', () async {
+    final response = await send(
+      'GET',
+      '/bridge/status',
+      token: 'test-secret',
+    );
+    expect(response.statusCode, HttpStatus.ok);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['connected'], isTrue);
+    expect(body['session']['heartbeatSeconds'], 30);
+  });
+
+  test('bridge heartbeat works as a cheap keep-alive', () async {
+    final response = await send(
+      'POST',
+      '/bridge/heartbeat',
+      token: 'test-secret',
+    );
+    expect(response.statusCode, HttpStatus.ok);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['session']['sessionId'], 'abc');
   });
 }

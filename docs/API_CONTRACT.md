@@ -3,6 +3,11 @@
 The Termux SSH Bridge exposes a small JSON API over HTTP on port `8765`.
 The API and the mobile terminal share one SSH connection.
 
+Phase 1 adds an **on-demand bridge**: instead of queueing commands for a poll,
+a client can open a session with `POST /bridge/connect`, run commands with
+`POST /bridge/execute`, and close it with `POST /bridge/disconnect`. The
+`/connect`, `/execute` and `/disconnect` endpoints remain as aliases.
+
 ## Authentication
 
 Every JSON endpoint, including `/health`, requires a bearer token:
@@ -30,11 +35,34 @@ Requests without a valid token receive HTTP `401` and this response:
 The server allows browser cross-origin requests and includes CORS headers.
 Use HTTPS or an SSH tunnel when the browser page is served over HTTPS.
 
+## Bridge PIN
+
+The **API** tab can store an optional numeric PIN. When it is set,
+`POST /bridge/connect` and `POST /connect` require it:
+
+```json
+{ "profile": "Default Tailscale Termux", "pin": "1234" }
+```
+
+Five failed attempts lock PIN entry for one minute (`429 pin_locked`).
+An empty PIN disables the check. The bearer token is still mandatory.
+
+## Session lifecycle
+
+| Phase | Rule |
+| --- | --- |
+| Active | A command resets the idle timer. Heartbeat: **5 s**. |
+| Idle | No command for **30 s**. Heartbeat eases to **30 s**. |
+| Closed | No command for **30 min**. The SSH connection is closed automatically. |
+
+The app also closes the session if the phone's own **Disconnect** button is
+used, and reports the new state on the next request.
+
 ## Endpoints
 
 ### `GET /health`
 
-Returns the shared SSH connection state.
+Returns the shared SSH connection state plus the current bridge session.
 
 ```json
 {
@@ -42,11 +70,22 @@ Returns the shared SSH connection state.
   "status": "ok",
   "sshConnected": true,
   "sshConnecting": false,
-  "activeProfile": "default"
+  "activeProfile": "default",
+  "bridge": {
+    "sessionId": "6f1c...",
+    "profile": "Default Tailscale Termux",
+    "connectedForSeconds": 42,
+    "idleSeconds": 3,
+    "idle": false,
+    "commandCount": 2,
+    "heartbeatSeconds": 5
+  }
 }
 ```
 
-### `POST /connect`
+`bridge` is `null` when no session is open.
+
+### `POST /bridge/connect` (alias: `POST /connect`)
 
 Connects to a profile already stored in the app. The request body identifies
 the profile by its ID or display name. The API never needs or returns the SSH
@@ -54,7 +93,8 @@ password.
 
 ```json
 {
-  "profile": "Default Tailscale Termux"
+  "profile": "Default Tailscale Termux",
+  "pin": "1234"
 }
 ```
 
@@ -64,16 +104,27 @@ Success:
 {
   "ok": true,
   "connected": true,
-  "profile": "Default Tailscale Termux"
+  "profile": "Default Tailscale Termux",
+  "pinRequired": true,
+  "session": {
+    "sessionId": "6f1c...",
+    "connectedForSeconds": 0,
+    "idleSeconds": 0,
+    "idle": false,
+    "commandCount": 0,
+    "heartbeatSeconds": 5
+  }
 }
 ```
 
 If authentication fails, the endpoint returns `ok: false`, `connected: false`,
 and a `message` describing the failure.
 
-### `POST /execute`
+### `POST /bridge/execute` (alias: `POST /execute`)
 
 Executes a command over the active SSH connection and waits for it to finish.
+The command never waits for an external poll: it runs as soon as the request
+arrives.
 
 ```json
 {
@@ -88,26 +139,68 @@ Success:
   "ok": true,
   "stdout": "Linux termux 6.1.0-aarch64\n",
   "stderr": "",
-  "exitCode": 0
+  "exitCode": 0,
+  "session": { "idle": false, "heartbeatSeconds": 5 }
 }
 ```
 
 `ok` reflects whether the exit code was zero. A non-zero command exit remains
 an HTTP `200` response so the caller can inspect `stderr` and `exitCode`.
 
-The command must satisfy the configured allowlist. Every segment separated by
-`&&`, `||`, `;`, or `|` must begin with an allowed prefix. Command substitution
-and input/output redirection are disabled. A rejected command returns HTTP
-`403` with error code `command_not_allowed`.
+### Command policy (ban list)
 
-### `POST /disconnect`
+Phase 1 replaced the allow list with a **ban list**, editable in the app's
+**API** tab (one blocked command or pattern per line, `#` starts a comment).
 
-Closes the shared SSH connection.
+* A command is rejected when its first token — or the basename of an absolute
+  path — equals a banned name, or when the line contains a banned multi-word
+  pattern.
+* Banned names also cover dotted variants: `mkfs` blocks `mkfs.ext4`.
+* Shell indirection (`sh`, `bash`, `eval`, `exec`, `command`, `builtin`) is
+  banned by default so a caller cannot route around the list.
+* Command substitution, redirection, newlines and control characters are
+  rejected outright. `;`, `&`, and `|` split the command into segments and
+  every segment is checked.
+
+A rejected command returns HTTP `403`:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "command_not_allowed",
+    "message": "\"rm\" is on the command ban list."
+  }
+}
+```
+
+The default list targets destructive and power operations only (`rm`, `dd`,
+`mkfs`, `sudo`, `shutdown`, …). Because a ban list permits everything else,
+the bearer token and the phone's SSH credentials are the primary controls —
+treat the token as a secret.
+
+### `POST /bridge/disconnect` (alias: `POST /disconnect`)
+
+Closes the shared SSH connection and ends the session.
 
 ```json
 {
   "ok": true,
-  "connected": false
+  "connected": false,
+  "session": null
+}
+```
+
+### `GET /bridge/status` and `POST /bridge/heartbeat`
+
+Return the current session without running a command. A heartbeat does not
+count as command activity and does not reset the idle timer.
+
+```json
+{
+  "ok": true,
+  "connected": true,
+  "session": { "sessionId": "6f1c...", "idle": true, "heartbeatSeconds": 30 }
 }
 ```
 
@@ -125,9 +218,10 @@ Error responses use one envelope:
 }
 ```
 
-Common status codes are `400` (bad request), `401` (bad token), `403`
+Common status codes are `400` (bad request), `401` (bad token or PIN), `403`
 (command denied), `404` (unknown route or profile), `409` (gateway state
-conflict), `413` (body too large), and `500` (execution/server failure).
+conflict), `413` (body too large), `429` (PIN locked) and `500`
+(execution/server failure).
 
 ## Network security
 
@@ -149,11 +243,14 @@ with the webapp from the app's **API** tab:
 2. In the phone app, enter the HTTPS webapp URL, pairing code, and saved SSH
    profile to use for cloud commands.
 3. Keep the phone app open. It polls `/api/public/device/poll` every five
-   seconds over HTTPS, executes allowed commands through the selected SSH
-   profile, and reports output to `/api/public/device/result`.
+   seconds over HTTPS, executes commands through the selected SSH profile, and
+   reports output to `/api/public/device/result`.
 
 The device key returned by `/api/public/device/pair` is kept in encrypted
-device storage. The phone enforces the API tab command allowlist for cloud
-commands too, and reports disallowed commands as `rejected`. The webapp API
-bearing the device key is separate from the local Gateway API bearer token.
-Unlink from the app or the webapp's Devices page to revoke the cloud key.
+device storage. The phone enforces the same ban list for cloud commands and
+reports rejected commands as `rejected`. The webapp API bearing the device key
+is separate from the local Gateway API bearer token. Unlink from the app or the
+webapp's Devices page to revoke the cloud key.
+
+The cloud queue remains the fallback when the browser cannot reach the phone
+directly. When it can, the bridge endpoints above remove the polling delay.

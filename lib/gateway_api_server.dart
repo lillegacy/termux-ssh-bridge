@@ -9,11 +9,13 @@ class GatewayHealth {
     required this.connected,
     required this.connecting,
     this.activeProfile,
+    this.bridge,
   });
 
   final bool connected;
   final bool connecting;
   final String? activeProfile;
+  final Map<String, Object?>? bridge;
 }
 
 class GatewayConnectResult {
@@ -21,11 +23,15 @@ class GatewayConnectResult {
     required this.connected,
     required this.profile,
     this.message,
+    this.pinRequired = false,
+    this.session,
   });
 
   final bool connected;
   final String profile;
   final String? message;
+  final bool pinRequired;
+  final Map<String, Object?>? session;
 }
 
 class GatewayCommandResult {
@@ -59,6 +65,7 @@ typedef GatewayExecuteCallback = Future<GatewayCommandResult> Function(
   String command,
 );
 typedef GatewayDisconnectCallback = Future<void> Function();
+typedef GatewayStatusCallback = Future<Map<String, Object?>?> Function();
 
 class GatewayApiServer {
   GatewayApiServer({
@@ -68,6 +75,7 @@ class GatewayApiServer {
     required this.connectCallback,
     required this.executeCallback,
     required this.disconnectCallback,
+    this.bridgeStatusCallback,
     this.port = 8765,
     this.allowLan = false,
     this.maxBodyBytes = 1024 * 1024,
@@ -79,6 +87,7 @@ class GatewayApiServer {
   final GatewayConnectCallback connectCallback;
   final GatewayExecuteCallback executeCallback;
   final GatewayDisconnectCallback disconnectCallback;
+  final GatewayStatusCallback? bridgeStatusCallback;
   final int port;
   final bool allowLan;
   final int maxBodyBytes;
@@ -158,6 +167,16 @@ class GatewayApiServer {
         await _handleExecute(request, response);
       } else if (request.method == 'POST' && path == '/disconnect') {
         await _handleDisconnect(response);
+      } else if (request.method == 'POST' && path == '/bridge/connect') {
+        await _handleConnect(request, response);
+      } else if (request.method == 'POST' && path == '/bridge/execute') {
+        await _handleExecute(request, response);
+      } else if (request.method == 'POST' && path == '/bridge/disconnect') {
+        await _handleDisconnect(response);
+      } else if (request.method == 'GET' && path == '/bridge/status') {
+        await _handleBridgeStatus(response);
+      } else if (request.method == 'POST' && path == '/bridge/heartbeat') {
+        await _handleBridgeStatus(response);
       } else {
         _writeJson(response, HttpStatus.notFound, {
           'ok': false,
@@ -207,6 +226,7 @@ class GatewayApiServer {
       'sshConnected': health.connected,
       'sshConnecting': health.connecting,
       'activeProfile': health.activeProfile,
+      if (health.bridge != null) 'bridge': health.bridge,
     });
   }
 
@@ -229,7 +249,9 @@ class GatewayApiServer {
       'ok': result.connected,
       'connected': result.connected,
       'profile': result.profile,
+      'pinRequired': result.pinRequired,
       if (result.message != null) 'message': result.message,
+      if (result.session != null) 'session': result.session,
     });
   }
 
@@ -262,6 +284,8 @@ class GatewayApiServer {
       'stdout': result.stdout,
       'stderr': result.stderr,
       'exitCode': result.exitCode,
+      if (bridgeStatusCallback != null)
+        'session': await bridgeStatusCallback!(),
     });
   }
 
@@ -270,6 +294,16 @@ class GatewayApiServer {
     _writeJson(response, HttpStatus.ok, {
       'ok': true,
       'connected': false,
+      'session': null,
+    });
+  }
+
+  Future<void> _handleBridgeStatus(HttpResponse response) async {
+    final session = await bridgeStatusCallback?.call();
+    _writeJson(response, HttpStatus.ok, {
+      'ok': true,
+      'connected': session != null,
+      'session': session,
     });
   }
 
@@ -306,7 +340,7 @@ class GatewayApiServer {
   void _writeJson(
     HttpResponse response,
     int statusCode,
-    Map<String, dynamic> body,
+    Map<String, Object?> body,
   ) {
     response
       ..statusCode = statusCode
