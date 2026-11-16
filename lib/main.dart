@@ -118,6 +118,12 @@ class _DashboardScreenState extends State<DashboardScreen>
   static const _cloudDeviceKey = 'cloud_device_key';
   static const _defaultBanList = CommandPolicy.defaultBannedPatterns;
 
+  /// SSH `exec` requests run in a minimal-PATH login shell, so Termux binaries
+  /// (`tmux`, `git`, `python3`, …) are not found and the shell exits with 127.
+  /// Prefixing PATH makes the bridge behave like the interactive terminal.
+  static const _shellPathPrefix =
+      r'export PATH=/data/data/com.termux/files/usr/bin:/system/bin:/system/xbin:$PATH; ';
+
   SSHClient? _client;
   bool _isConnected = false;
   bool _isConnecting = false;
@@ -469,7 +475,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     final stdoutComplete = Completer<void>();
     final stderrComplete = Completer<void>();
     try {
-      final session = await _client!.execute(command);
+      final session = await _client!.execute('$_shellPathPrefix$command');
       session.stdout.listen((data) {
         final output = String.fromCharCodes(data);
         stdout.write(output);
@@ -487,7 +493,12 @@ class _DashboardScreenState extends State<DashboardScreen>
       await session.done;
       await Future.wait([stdoutComplete.future, stderrComplete.future]);
       final exitCode = session.exitCode ?? 0;
-      if (exitCode != 0) {
+      if (exitCode == 127) {
+        _addLog(
+          '[exit 127] Command not found. Check the binary exists for this SSH profile (try: which <command>).',
+          color: Colors.orangeAccent,
+        );
+      } else if (exitCode != 0) {
         _addLog('[Process exited with code $exitCode]',
             color: Colors.orangeAccent);
       }
@@ -1076,7 +1087,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     _addLog('\$ $commandStr', color: const Color(0xFF38BDF8));
 
     try {
-      final session = await _client!.execute(commandStr);
+      final session = await _client!.execute('$_shellPathPrefix$commandStr');
 
       session.stdout.listen((data) {
         final output = String.fromCharCodes(data).trimRight();
