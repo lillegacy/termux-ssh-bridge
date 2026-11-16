@@ -34,11 +34,39 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Restore stable release keystore
+        if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set. Refusing to build a throwaway-signed APK that could not update an installed app."
+            exit 1
+          fi
+          mkdir -p android/keystore
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/keystore/release.jks
+          {
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyPassword=$KEY_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "storeFile=keystore/release.jks"
+          } > android/key.properties
+          echo "Stable release keystore restored."
+
       - name: Install Dependencies
         run: flutter pub get
 
       - name: Build Release APK (ARM64)
         run: flutter build apk --release --target-platform android-arm64
+
+      - name: Verify APK signing certificate
+        run: |
+          keytool -printcert -jarfile build/app/outputs/flutter-apk/app-release.apk | head -25
+          echo "Expected SHA256: D5:42:FD:9D:C3:FF:B9:31:89:1E:65:FC:7A:E9:67:BF:62:63:9D:83:8B:00:BB:E1:13:7B:1C:BF:9C:BB:E2:43"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
