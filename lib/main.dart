@@ -1973,6 +1973,9 @@ class _DashboardScreenState extends State<DashboardScreen>
                 child: TextField(
                   controller: _commandController,
                   enabled: !_isConnecting,
+                  textCapitalization: TextCapitalization.none,
+                  autocorrect: false,
+                  enableSuggestions: false,
                   style:
                       TextStyle(fontFamily: 'monospace', fontSize: _fontSize),
                   decoration: InputDecoration(
