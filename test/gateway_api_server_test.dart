@@ -9,6 +9,7 @@ void main() {
   late GatewayApiServer server;
   late HttpClient client;
   var disconnected = false;
+  var wakeCount = 0;
 
   setUp(() async {
     disconnected = false;
@@ -47,6 +48,10 @@ void main() {
       terminalOpenCallback: (columns, rows) async {
         throw StateError('SSH terminals are not available in this test.');
       },
+      wakeCallback: () async {
+        wakeCount++;
+      },
+      version: '1.5.1+11',
     );
     await server.start();
     client = HttpClient();
@@ -244,5 +249,30 @@ void main() {
     expect(response.statusCode, HttpStatus.unauthorized);
     final body = jsonDecode(await response.transform(utf8.decoder).join());
     expect(body['error']['code'], 'invalid_ticket');
+  });
+
+  test('health reports the app version', () async {
+    final response = await send('GET', '/health', token: 'test-secret');
+    expect(response.statusCode, HttpStatus.ok);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['version'], '1.5.1+11');
+  });
+
+  test('ping wakes the app and reports the version', () async {
+    wakeCount = 0;
+    final response = await send('POST', '/bridge/ping', token: 'test-secret');
+    expect(response.statusCode, HttpStatus.ok);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['pong'], isTrue);
+    expect(body['version'], '1.5.1+11');
+    expect(body['activeTerminals'], 0);
+    expect(wakeCount, 1);
+  });
+
+  test('ping requires the bearer token', () async {
+    wakeCount = 0;
+    final response = await send('POST', '/bridge/ping');
+    expect(response.statusCode, HttpStatus.unauthorized);
+    expect(wakeCount, 0);
   });
 }

@@ -82,6 +82,7 @@ typedef GatewayExecuteCallback = Future<GatewayCommandResult> Function(
 );
 typedef GatewayDisconnectCallback = Future<void> Function();
 typedef GatewayStatusCallback = Future<Map<String, Object?>?> Function();
+typedef GatewayWakeCallback = Future<void> Function();
 typedef GatewayTerminalOpenCallback = Future<GatewayTerminal> Function(
   int columns,
   int rows,
@@ -97,9 +98,11 @@ class GatewayApiServer {
     required this.disconnectCallback,
     this.bridgeStatusCallback,
     this.terminalOpenCallback,
+    this.wakeCallback,
     this.port = 8765,
     this.allowLan = false,
     this.maxBodyBytes = 1024 * 1024,
+    this.version = 'dev',
   });
 
   final String token;
@@ -110,9 +113,11 @@ class GatewayApiServer {
   final GatewayDisconnectCallback disconnectCallback;
   final GatewayStatusCallback? bridgeStatusCallback;
   final GatewayTerminalOpenCallback? terminalOpenCallback;
+  final GatewayWakeCallback? wakeCallback;
   final int port;
   final bool allowLan;
   final int maxBodyBytes;
+  final String version;
 
   HttpServer? _server;
   Uri? _baseUri;
@@ -214,6 +219,10 @@ class GatewayApiServer {
         await _handleBridgeStatus(response);
       } else if (request.method == 'POST' && path == '/bridge/heartbeat') {
         await _handleBridgeStatus(response);
+      } else if (request.method == 'POST' && path == '/bridge/ping') {
+        await _handlePing(response);
+      } else if (request.method == 'POST' && path == '/ping') {
+        await _handlePing(response);
       } else if (request.method == 'POST' &&
           path == '/bridge/terminal/ticket') {
         _handleTerminalTicket(response);
@@ -270,6 +279,7 @@ class GatewayApiServer {
     _writeJson(response, HttpStatus.ok, {
       'ok': true,
       'status': 'ok',
+      'version': version,
       'sshConnected': health.connected,
       'sshConnecting': health.connecting,
       'activeProfile': health.activeProfile,
@@ -349,8 +359,25 @@ class GatewayApiServer {
     final session = await bridgeStatusCallback?.call();
     _writeJson(response, HttpStatus.ok, {
       'ok': true,
+      'version': version,
       'connected': session != null,
       'session': session,
+    });
+  }
+
+  /// Cheap wake-up call for the webapp: nudges the app isolate, polls the
+  /// cloud queue immediately and reports the build that answered.
+  Future<void> _handlePing(HttpResponse response) async {
+    await wakeCallback?.call();
+    final health = await healthCallback();
+    _writeJson(response, HttpStatus.ok, {
+      'ok': true,
+      'pong': true,
+      'version': version,
+      'sshConnected': health.connected,
+      'sshConnecting': health.connecting,
+      'activeTerminals': _activeTerminals,
+      'serverTime': DateTime.now().toUtc().toIso8601String(),
     });
   }
 

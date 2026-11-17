@@ -61,7 +61,12 @@ jobs:
         run: flutter pub get
 
       - name: Build Release APK (ARM64)
-        run: flutter build apk --release --target-platform android-arm64
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -m1 '^version:' pubspec.yaml | awk '{print $2}')
+          echo "Building Termux SSH Bridge ${VERSION}"
+          flutter build apk --release --target-platform android-arm64 \
+            --dart-define=APP_VERSION="${VERSION}"
 
       - name: Verify APK signing certificate
         run: |

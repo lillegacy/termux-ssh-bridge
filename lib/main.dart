@@ -8,6 +8,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_info.dart';
 import 'bridge_session.dart';
 import 'command_policy.dart';
 import 'cloud_device_client.dart';
@@ -321,6 +322,8 @@ class _DashboardScreenState extends State<DashboardScreen>
         disconnectCallback: _disconnect,
         bridgeStatusCallback: () async => _bridgeStatusJson(),
         terminalOpenCallback: _apiOpenTerminal,
+        wakeCallback: _apiWake,
+        version: appVersion,
       );
       await server.start();
       if (!mounted) {
@@ -562,6 +565,20 @@ class _DashboardScreenState extends State<DashboardScreen>
     } catch (error) {
       throw GatewayApiException(500, 'execution_failed', error.toString());
     }
+  }
+
+  Future<void> _apiWake() async {
+    _bridgeSession?.recordActivity(DateTime.now());
+    if (_cloudKey != null) {
+      // The browser is asking for attention: poll the queue right away instead
+      // of waiting for the next background tick, and keep the 30s cadence when
+      // the app is not in front.
+      final resumed =
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+      _restartCloudPolling(Duration(seconds: resumed ? 5 : 30));
+    }
+    _syncKeepAliveText();
+    _addLog('Web ping received.', color: Colors.blueGrey);
   }
 
   Future<GatewayTerminal> _apiOpenTerminal(int columns, int rows) async {
@@ -1322,8 +1339,19 @@ class _DashboardScreenState extends State<DashboardScreen>
           children: [
             const Icon(Icons.terminal, color: Color(0xFF38BDF8)),
             const SizedBox(width: 10),
-            const Text('Termux SSH Bridge',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Termux SSH Bridge',
+                    style:
+                        TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                Text(
+                  appVersionLabel,
+                  style: const TextStyle(fontSize: 10, color: Colors.grey),
+                ),
+              ],
+            ),
             const Spacer(),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -1745,6 +1773,13 @@ class _DashboardScreenState extends State<DashboardScreen>
         _buildApiPolicyCard(),
         _buildBackgroundCard(),
         _buildCloudDeviceCard(),
+        const SizedBox(height: 6),
+        Center(
+          child: Text(
+            'Termux SSH Bridge $appVersionLabel',
+            style: const TextStyle(color: Colors.grey, fontSize: 11),
+          ),
+        ),
       ],
     );
   }

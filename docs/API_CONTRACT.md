@@ -191,6 +191,28 @@ Closes the shared SSH connection and ends the session.
 }
 ```
 
+### `POST /bridge/ping` (alias: `POST /ping`)
+
+Wake-up call for the webapp. It nudges the app isolate, polls the cloud queue
+immediately instead of waiting for the next background tick, counts as bridge
+activity and answers in a few milliseconds. The webapp uses it as a liveness
+and version probe.
+
+```json
+{
+  "ok": true,
+  "pong": true,
+  "version": "1.5.1+11",
+  "sshConnected": true,
+  "sshConnecting": false,
+  "activeTerminals": 0,
+  "serverTime": "2026-11-17T02:40:00.000Z"
+}
+```
+
+`GET /health`, `POST /bridge/ping` and `GET /bridge/status` all report
+`version`, so a stale install is visible from the browser without guessing.
+
 ### `GET /bridge/status` and `POST /bridge/heartbeat`
 
 Return the current session without running a command. A heartbeat does not
@@ -199,6 +221,7 @@ count as command activity and does not reset the idle timer.
 ```json
 {
   "ok": true,
+  "version": "1.5.1+11",
   "connected": true,
   "session": { "sessionId": "6f1c...", "idle": true, "heartbeatSeconds": 30 }
 }
