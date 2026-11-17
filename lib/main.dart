@@ -12,6 +12,7 @@ import 'bridge_session.dart';
 import 'command_policy.dart';
 import 'cloud_device_client.dart';
 import 'gateway_api_server.dart';
+import 'keep_alive.dart';
 
 void main() {
   runApp(const TermuxSshBridgeApp());
@@ -138,6 +139,8 @@ class _DashboardScreenState extends State<DashboardScreen>
   bool _apiAllowLan = false;
   String _apiError = '';
   bool _apiPinVisible = false;
+  bool _keepAliveEnabled = true;
+  bool _batteryExempt = false;
   BridgeSession? _bridgeSession;
   Timer? _bridgeTicker;
   bool _bridgeIdleNotified = false;
@@ -184,12 +187,14 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (state == AppLifecycleState.resumed) {
       _restartCloudPolling(const Duration(seconds: 5));
       if (mounted) setState(() => _cloudStatus = 'Online');
+      _syncKeepAliveText();
     } else if (state == AppLifecycleState.paused) {
       // Keep reporting while backgrounded so the webapp still sees the device.
       // Without a foreground service Android may eventually stop the isolate;
       // slowing the poll keeps battery use down until Phase 2 adds a service.
       _restartCloudPolling(const Duration(seconds: 30));
       if (mounted) setState(() => _cloudStatus = 'Background (30s poll)');
+      _syncKeepAliveText();
     }
   }
 
@@ -275,8 +280,11 @@ class _DashboardScreenState extends State<DashboardScreen>
     _apiPinController.text =
         await _secureStorage.read(key: _bridgePinKey) ?? '';
 
+    _keepAliveEnabled = prefs.getBool('keep_alive_enabled') ?? true;
+
     _addLog('Loaded profiles and preferences.', color: Colors.cyanAccent);
     await _startApiServer();
+    await _applyKeepAlive();
 
     _cloudKey = await _secureStorage.read(key: _cloudDeviceKey);
     if (mounted &&
@@ -335,6 +343,40 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
   }
 
+  String get _keepAliveText {
+    final gateway = _apiRunning
+        ? (_apiAllowLan
+            ? 'Gateway on 0.0.0.0:${_apiServer?.baseUri?.port ?? 8765}'
+            : 'Gateway on 127.0.0.1:${_apiServer?.baseUri?.port ?? 8765}')
+        : 'Gateway stopped';
+    final cloud =
+        _cloudKey == null ? 'cloud not paired' : 'cloud $_cloudStatus';
+    return '$gateway · $cloud';
+  }
+
+  Future<void> _applyKeepAlive() async {
+    if (_keepAliveEnabled) {
+      await BridgeKeepAlive.requestNotificationPermission();
+      await BridgeKeepAlive.start(_keepAliveText);
+      _batteryExempt = await BridgeKeepAlive.isIgnoringBatteryOptimizations();
+    } else {
+      await BridgeKeepAlive.stop();
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _refreshBatteryExemption() async {
+    final exempt = await BridgeKeepAlive.isIgnoringBatteryOptimizations();
+    if (mounted && exempt != _batteryExempt) {
+      setState(() => _batteryExempt = exempt);
+    }
+  }
+
+  void _syncKeepAliveText() {
+    if (!_keepAliveEnabled) return;
+    unawaited(BridgeKeepAlive.update(_keepAliveText));
+  }
+
   Future<void> _stopApiServer() async {
     await _apiServer?.stop();
     if (mounted) {
@@ -365,6 +407,7 @@ class _DashboardScreenState extends State<DashboardScreen>
       value: _apiPinController.text.trim(),
     );
     await _restartApiServer();
+    _syncKeepAliveText();
     if (mounted) {
       setState(() => _apiError = '');
       _addLog('Gateway API settings saved.', color: Colors.greenAccent);
@@ -568,6 +611,7 @@ class _DashboardScreenState extends State<DashboardScreen>
       _addLog('Paired with the webapp command queue.',
           color: Colors.greenAccent);
       _startCloudPolling();
+      _syncKeepAliveText();
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -600,6 +644,7 @@ class _DashboardScreenState extends State<DashboardScreen>
         _cloudError = '';
       });
       _addLog('Unlinked the cloud device.', color: Colors.orangeAccent);
+      _syncKeepAliveText();
     } catch (error) {
       if (error is CloudDeviceException &&
           (error.statusCode == 401 || error.statusCode == 404)) {
@@ -1668,8 +1713,68 @@ class _DashboardScreenState extends State<DashboardScreen>
         ),
         _buildApiAuthenticationCard(),
         _buildApiPolicyCard(),
+        _buildBackgroundCard(),
         _buildCloudDeviceCard(),
       ],
+    );
+  }
+
+  Widget _buildBackgroundCard() {
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Background',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Runs a foreground service so the gateway and cloud polling survive '
+              'screen-off and app switching. Android shows a permanent notification '
+              'while it is active.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Keep running in the background'),
+              subtitle: Text(
+                _keepAliveEnabled ? _keepAliveText : 'Disabled',
+                style: const TextStyle(fontSize: 11),
+              ),
+              value: _keepAliveEnabled,
+              onChanged: (value) async {
+                setState(() => _keepAliveEnabled = value);
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setBool('keep_alive_enabled', value);
+                await _applyKeepAlive();
+              },
+            ),
+            if (_keepAliveEnabled && !_batteryExempt) ...[
+              const SizedBox(height: 4),
+              const Text(
+                'Android may still stop the service under battery optimisation. '
+                'Allow unrestricted battery use for reliable background operation.',
+                style: TextStyle(color: Colors.grey, fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  await BridgeKeepAlive.requestIgnoreBatteryOptimizations();
+                  await Future<void>.delayed(const Duration(seconds: 2));
+                  await _refreshBatteryExemption();
+                },
+                icon: const Icon(Icons.battery_saver, size: 18),
+                label: const Text('Allow unrestricted battery'),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 

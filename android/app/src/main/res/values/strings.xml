@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="keep_alive_title">Termux SSH Bridge</string>
+    <string name="keep_alive_default_text">Gateway and cloud polling are active</string>
+    <string name="keep_alive_channel_name">Bridge keep-alive</string>
+    <string name="keep_alive_channel_description">Keeps the SSH gateway and device polling running while the screen is off.</string>
+</resources>
