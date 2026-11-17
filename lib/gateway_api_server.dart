@@ -123,6 +123,8 @@ class GatewayApiServer {
   static const _terminalTicketTtl = Duration(seconds: 60);
   static const _maxTerminalTickets = 32;
   static const _maxTerminals = 4;
+  static const _maxBytesPerWindow = 2 * 1024 * 1024;
+  static const _terminalWindow = Duration(milliseconds: 500);
 
   Uri? get baseUri => _baseUri;
   bool get isRunning => _server != null;
@@ -475,6 +477,7 @@ class GatewayApiServer {
     }
 
     var closed = false;
+    Timer? flowTimer;
     StreamSubscription<List<int>>? outputSubscription;
     StreamSubscription<List<int>>? errorSubscription;
     late final StreamSubscription<dynamic> socketSubscription;
@@ -488,6 +491,8 @@ class GatewayApiServer {
       if (closed) return;
       closed = true;
       _activeTerminals--;
+      flowTimer?.cancel();
+      flowTimer = null;
       await outputSubscription?.cancel();
       await errorSubscription?.cancel();
       try {
@@ -498,9 +503,31 @@ class GatewayApiServer {
       } catch (_) {}
     }
 
+    // Throttle runaway output (`yes`, a huge `cat`) instead of letting it
+    // fill the WebSocket buffer as fast as SSH can deliver it.
+    var windowBytes = 0;
+    var windowStarted = DateTime.now();
+
     void forward(List<int> data) {
       if (closed || socket.readyState != WebSocket.open) return;
       socket.add(data);
+      final now = DateTime.now();
+      if (now.difference(windowStarted) >= _terminalWindow) {
+        windowStarted = now;
+        windowBytes = 0;
+      }
+      windowBytes += data.length;
+      if (windowBytes < _maxBytesPerWindow || flowTimer != null) return;
+      outputSubscription?.pause();
+      errorSubscription?.pause();
+      flowTimer = Timer(_terminalWindow, () {
+        flowTimer = null;
+        windowStarted = DateTime.now();
+        windowBytes = 0;
+        if (closed) return;
+        outputSubscription?.resume();
+        errorSubscription?.resume();
+      });
     }
 
     outputSubscription = session.output.listen(
