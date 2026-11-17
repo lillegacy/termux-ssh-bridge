@@ -448,6 +448,8 @@ class GatewayApiServer {
     } catch (_) {
       return;
     }
+    // Detect dead browsers so idle terminals do not hold a session slot.
+    socket.pingInterval = const Duration(seconds: 20);
 
     _activeTerminals++;
     final GatewayTerminal session;
