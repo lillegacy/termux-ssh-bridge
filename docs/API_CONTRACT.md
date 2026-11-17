@@ -204,6 +204,77 @@ count as command activity and does not reset the idle timer.
 }
 ```
 
+### `GET /bridge/terminal/status`
+
+Reports whether interactive terminals are available and how many are open.
+Requires the bearer token.
+
+```json
+{
+  "ok": true,
+  "activeTerminals": 0,
+  "maxTerminals": 4,
+  "available": true
+}
+```
+
+### `POST /bridge/terminal/ticket`
+
+Exchange the bearer token for a single-use WebSocket ticket. Tickets expire
+after 60 seconds and are consumed by the first successful upgrade. Browsers
+cannot set an `Authorization` header on a WebSocket handshake, so the ticket
+travels in the query string instead.
+
+```json
+{
+  "ok": true,
+  "ticket": "hR2...",
+  "expiresInSeconds": 60,
+  "maxTerminals": 4,
+  "activeTerminals": 0
+}
+```
+
+### `GET /bridge/terminal` (WebSocket)
+
+Open a full PTY over the existing SSH connection:
+
+```
+ws://HOST:8765/bridge/terminal?ticket=TICKET&cols=120&rows=32
+```
+
+The upgrade is rejected unless the ticket is valid. At most four terminals can
+be open at once (`429 too_many_terminals`). `cols` and `rows` are clamped to
+20–400 and 5–200.
+
+Frames are asymmetric so raw terminal output is never re-encoded:
+
+- **Server → client binary frames** carry raw PTY output bytes.
+- **Server → client text frames** carry JSON control messages.
+- **Client → server text frames** carry JSON control messages.
+
+Control messages:
+
+```json
+{ "type": "ready", "columns": 120, "rows": 32, "terminal": "xterm-256color" }
+{ "type": "exit", "code": 0 }
+{ "type": "error", "code": "stream_failed", "message": "..." }
+{ "type": "pong" }
+```
+
+Client messages:
+
+```json
+{ "type": "input", "data": "ls -la\r" }
+{ "type": "resize", "cols": 100, "rows": 40 }
+{ "type": "ping" }
+```
+
+`input.data` is UTF-8 encoded before it is written to the SSH channel.
+`resize` updates the remote window size immediately. An open terminal keeps the
+bridge session alive: the idle timer is reset while any terminal is connected,
+so a long-running `tmux` or `vim` session is not disconnected after 30 minutes.
+
 ## Errors
 
 Error responses use one envelope:

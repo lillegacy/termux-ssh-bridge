@@ -44,6 +44,9 @@ void main() {
         'idle': true,
         'heartbeatSeconds': 30,
       },
+      terminalOpenCallback: (columns, rows) async {
+        throw StateError('SSH terminals are not available in this test.');
+      },
     );
     await server.start();
     client = HttpClient();
@@ -186,5 +189,60 @@ void main() {
     expect(response.statusCode, HttpStatus.ok);
     final body = jsonDecode(await response.transform(utf8.decoder).join());
     expect(body['session']['sessionId'], 'abc');
+  });
+
+  test('terminal status reports availability', () async {
+    final response = await send(
+      'GET',
+      '/bridge/terminal/status',
+      token: 'test-secret',
+    );
+    expect(response.statusCode, HttpStatus.ok);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['available'], isTrue);
+    expect(body['activeTerminals'], 0);
+    expect(body['maxTerminals'], 4);
+  });
+
+  test('terminal ticket is issued to authorized clients', () async {
+    final response = await send(
+      'POST',
+      '/bridge/terminal/ticket',
+      token: 'test-secret',
+    );
+    expect(response.statusCode, HttpStatus.ok);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['ticket'], isA<String>());
+    expect((body['ticket'] as String).isNotEmpty, isTrue);
+    expect(body['expiresInSeconds'], 60);
+  });
+
+  test('terminal ticket requires the bearer token', () async {
+    final response = await send('POST', '/bridge/terminal/ticket');
+    expect(response.statusCode, HttpStatus.unauthorized);
+  });
+
+  test('terminal websocket requires an upgrade request', () async {
+    final request = await client.getUrl(
+      server.baseUri!.replace(path: '/bridge/terminal'),
+    );
+    final response = await request.close();
+    expect(response.statusCode, HttpStatus.badRequest);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['error']['code'], 'upgrade_required');
+  });
+
+  test('terminal websocket rejects an unknown ticket', () async {
+    final request = await client.getUrl(
+      server.baseUri!.replace(path: '/bridge/terminal', query: 'ticket=bogus'),
+    );
+    request.headers.set(HttpHeaders.connectionHeader, 'Upgrade');
+    request.headers.set(HttpHeaders.upgradeHeader, 'websocket');
+    request.headers.set('Sec-WebSocket-Key', 'dGhlIHNhbXBsZSBub25jZQ==');
+    request.headers.set('Sec-WebSocket-Version', '13');
+    final response = await request.close();
+    expect(response.statusCode, HttpStatus.unauthorized);
+    final body = jsonDecode(await response.transform(utf8.decoder).join());
+    expect(body['error']['code'], 'invalid_ticket');
   });
 }

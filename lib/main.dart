@@ -320,6 +320,7 @@ class _DashboardScreenState extends State<DashboardScreen>
         executeCallback: _apiExecute,
         disconnectCallback: _disconnect,
         bridgeStatusCallback: () async => _bridgeStatusJson(),
+        terminalOpenCallback: _apiOpenTerminal,
       );
       await server.start();
       if (!mounted) {
@@ -561,6 +562,31 @@ class _DashboardScreenState extends State<DashboardScreen>
     } catch (error) {
       throw GatewayApiException(500, 'execution_failed', error.toString());
     }
+  }
+
+  Future<GatewayTerminal> _apiOpenTerminal(int columns, int rows) async {
+    final client = _client;
+    if (client == null || !_isConnected) {
+      throw const GatewayApiException(
+        409,
+        'not_connected',
+        'Connect to an SSH profile before opening a terminal.',
+      );
+    }
+    final session = await client.shell(
+      pty: SSHPtyConfig(width: columns, height: rows),
+    );
+    _bridgeSession?.recordActivity(DateTime.now());
+    _addLog(
+      'Web terminal opened (${columns}x$rows).',
+      color: Colors.greenAccent,
+    );
+    unawaited(
+      session.done.then((_) {
+        _addLog('Web terminal closed.', color: Colors.blueGrey);
+      }),
+    );
+    return SshTerminal(session);
   }
 
   Future<void> _pairCloudDevice() async {
@@ -1026,6 +1052,10 @@ class _DashboardScreenState extends State<DashboardScreen>
       return;
     }
     final now = DateTime.now();
+    if ((_apiServer?.activeTerminals ?? 0) > 0) {
+      // An open web terminal is active even when no commands are typed.
+      session.recordActivity(now);
+    }
     if (session.shouldAutoDisconnect(now)) {
       _addLog(
         'Bridge session idle for ${session.disconnectAfter.inMinutes} minutes; disconnecting.',
@@ -2143,4 +2173,33 @@ class _DashboardScreenState extends State<DashboardScreen>
       ),
     );
   }
+}
+
+/// Adapts a dartssh2 [SSHSession] to the plain [GatewayTerminal] interface the
+/// gateway speaks, so the HTTP layer never imports dartssh2.
+class SshTerminal implements GatewayTerminal {
+  SshTerminal(this._session);
+
+  final SSHSession _session;
+
+  @override
+  Stream<List<int>> get output => _session.stdout;
+
+  @override
+  Stream<List<int>> get errors => _session.stderr;
+
+  @override
+  void write(List<int> data) => _session.write(Uint8List.fromList(data));
+
+  @override
+  void resize(int columns, int rows) => _session.resizeTerminal(columns, rows);
+
+  @override
+  void close() => _session.close();
+
+  @override
+  int? get exitCode => _session.exitCode;
+
+  @override
+  Future<void> get done => _session.done;
 }

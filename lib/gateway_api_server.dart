@@ -1,8 +1,24 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'command_policy.dart';
+
+/// Handle over an interactive remote shell.
+///
+/// The gateway only needs a stream of output bytes plus write/resize/close, so
+/// it does not depend on the SSH implementation and can be tested without an
+/// SSH server.
+abstract class GatewayTerminal {
+  Stream<List<int>> get output;
+  Stream<List<int>> get errors;
+  void write(List<int> data);
+  void resize(int columns, int rows);
+  void close();
+  int? get exitCode;
+  Future<void> get done;
+}
 
 class GatewayHealth {
   const GatewayHealth({
@@ -66,6 +82,10 @@ typedef GatewayExecuteCallback = Future<GatewayCommandResult> Function(
 );
 typedef GatewayDisconnectCallback = Future<void> Function();
 typedef GatewayStatusCallback = Future<Map<String, Object?>?> Function();
+typedef GatewayTerminalOpenCallback = Future<GatewayTerminal> Function(
+  int columns,
+  int rows,
+);
 
 class GatewayApiServer {
   GatewayApiServer({
@@ -76,6 +96,7 @@ class GatewayApiServer {
     required this.executeCallback,
     required this.disconnectCallback,
     this.bridgeStatusCallback,
+    this.terminalOpenCallback,
     this.port = 8765,
     this.allowLan = false,
     this.maxBodyBytes = 1024 * 1024,
@@ -88,6 +109,7 @@ class GatewayApiServer {
   final GatewayExecuteCallback executeCallback;
   final GatewayDisconnectCallback disconnectCallback;
   final GatewayStatusCallback? bridgeStatusCallback;
+  final GatewayTerminalOpenCallback? terminalOpenCallback;
   final int port;
   final bool allowLan;
   final int maxBodyBytes;
@@ -95,8 +117,16 @@ class GatewayApiServer {
   HttpServer? _server;
   Uri? _baseUri;
 
+  final Map<String, DateTime> _terminalTickets = {};
+  int _activeTerminals = 0;
+
+  static const _terminalTicketTtl = Duration(seconds: 60);
+  static const _maxTerminalTickets = 32;
+  static const _maxTerminals = 4;
+
   Uri? get baseUri => _baseUri;
   bool get isRunning => _server != null;
+  int get activeTerminals => _activeTerminals;
 
   Future<Uri> start() async {
     if (_server != null) return _baseUri!;
@@ -143,6 +173,12 @@ class GatewayApiServer {
     }
 
     try {
+      final path = request.uri.path;
+      if (path == '/bridge/terminal') {
+        await _handleTerminalRequest(request);
+        return;
+      }
+
       if (!_isAuthorized(request)) {
         response.headers.set(
           'WWW-Authenticate',
@@ -158,7 +194,6 @@ class GatewayApiServer {
         return;
       }
 
-      final path = request.uri.path;
       if (request.method == 'GET' && path == '/health') {
         await _handleHealth(response);
       } else if (request.method == 'POST' && path == '/connect') {
@@ -177,6 +212,16 @@ class GatewayApiServer {
         await _handleBridgeStatus(response);
       } else if (request.method == 'POST' && path == '/bridge/heartbeat') {
         await _handleBridgeStatus(response);
+      } else if (request.method == 'POST' &&
+          path == '/bridge/terminal/ticket') {
+        _handleTerminalTicket(response);
+      } else if (request.method == 'GET' && path == '/bridge/terminal/status') {
+        _writeJson(response, HttpStatus.ok, {
+          'ok': true,
+          'activeTerminals': _activeTerminals,
+          'maxTerminals': _maxTerminals,
+          'available': terminalOpenCallback != null,
+        });
       } else {
         _writeJson(response, HttpStatus.notFound, {
           'ok': false,
@@ -305,6 +350,242 @@ class GatewayApiServer {
       'connected': session != null,
       'session': session,
     });
+  }
+
+  void _handleTerminalTicket(HttpResponse response) {
+    if (terminalOpenCallback == null) {
+      throw const GatewayApiException(
+        HttpStatus.notImplemented,
+        'terminal_unavailable',
+        'This gateway build cannot open interactive terminals.',
+      );
+    }
+    final ticket = _issueTerminalTicket();
+    _writeJson(response, HttpStatus.ok, {
+      'ok': true,
+      'ticket': ticket,
+      'expiresInSeconds': _terminalTicketTtl.inSeconds,
+      'maxTerminals': _maxTerminals,
+      'activeTerminals': _activeTerminals,
+    });
+  }
+
+  String _issueTerminalTicket() {
+    final now = DateTime.now();
+    _terminalTickets.removeWhere((_, expiry) => !now.isBefore(expiry));
+    while (_terminalTickets.length >= _maxTerminalTickets) {
+      _terminalTickets.remove(_terminalTickets.keys.first);
+    }
+    final random = Random.secure();
+    final bytes = List<int>.generate(24, (_) => random.nextInt(256));
+    final ticket = base64Url.encode(bytes).replaceAll('=', '');
+    _terminalTickets[ticket] = now.add(_terminalTicketTtl);
+    return ticket;
+  }
+
+  bool _consumeTerminalTicket(String ticket) {
+    if (ticket.isEmpty) return false;
+    final expiry = _terminalTickets.remove(ticket);
+    if (expiry == null) return false;
+    return DateTime.now().isBefore(expiry);
+  }
+
+  Future<void> _handleTerminalRequest(HttpRequest request) async {
+    if (request.method != 'GET') {
+      throw const GatewayApiException(
+        HttpStatus.methodNotAllowed,
+        'method_not_allowed',
+        'The terminal endpoint only accepts WebSocket GET requests.',
+      );
+    }
+    if (!WebSocketTransformer.isUpgradeRequest(request)) {
+      throw const GatewayApiException(
+        HttpStatus.badRequest,
+        'upgrade_required',
+        'This endpoint only accepts WebSocket connections.',
+      );
+    }
+    if (terminalOpenCallback == null) {
+      throw const GatewayApiException(
+        HttpStatus.notImplemented,
+        'terminal_unavailable',
+        'This gateway build cannot open interactive terminals.',
+      );
+    }
+    if (!_consumeTerminalTicket(request.uri.queryParameters['ticket'] ?? '')) {
+      throw const GatewayApiException(
+        HttpStatus.unauthorized,
+        'invalid_ticket',
+        'Request a fresh terminal ticket before connecting.',
+      );
+    }
+    if (_activeTerminals >= _maxTerminals) {
+      throw const GatewayApiException(
+        HttpStatus.tooManyRequests,
+        'too_many_terminals',
+        'The gateway already has the maximum number of open terminals.',
+      );
+    }
+
+    final columns = _clampTerminalValue(
+      request.uri.queryParameters['cols'],
+      80,
+      20,
+      400,
+    );
+    final rows = _clampTerminalValue(
+      request.uri.queryParameters['rows'],
+      24,
+      5,
+      200,
+    );
+
+    final WebSocket socket;
+    try {
+      socket = await WebSocketTransformer.upgrade(request);
+    } catch (_) {
+      return;
+    }
+
+    _activeTerminals++;
+    final GatewayTerminal session;
+    try {
+      session = await terminalOpenCallback!(columns, rows);
+    } catch (error) {
+      _activeTerminals--;
+      await socket.close(
+        WebSocketStatus.policyViolation,
+        'Terminal could not be opened.',
+      );
+      return;
+    }
+
+    var closed = false;
+    StreamSubscription<List<int>>? outputSubscription;
+    StreamSubscription<List<int>>? errorSubscription;
+    late final StreamSubscription<dynamic> socketSubscription;
+
+    void send(Map<String, Object?> message) {
+      if (closed || socket.readyState != WebSocket.open) return;
+      socket.add(jsonEncode(message));
+    }
+
+    Future<void> finish() async {
+      if (closed) return;
+      closed = true;
+      _activeTerminals--;
+      await outputSubscription?.cancel();
+      await errorSubscription?.cancel();
+      try {
+        await socketSubscription.cancel();
+      } catch (_) {}
+      try {
+        await socket.close();
+      } catch (_) {}
+    }
+
+    void forward(List<int> data) {
+      if (closed || socket.readyState != WebSocket.open) return;
+      socket.add(data);
+    }
+
+    outputSubscription = session.output.listen(
+      forward,
+      onDone: () {
+        send({'type': 'exit', 'code': session.exitCode});
+        unawaited(finish());
+      },
+      onError: (Object error) {
+        send({
+          'type': 'error',
+          'code': 'stream_failed',
+          'message': 'The terminal stream failed: $error',
+        });
+        unawaited(finish());
+      },
+    );
+    errorSubscription = session.errors.listen(
+      forward,
+      onError: (Object _) {},
+    );
+
+    socketSubscription = socket.listen(
+      (dynamic event) {
+        if (event is! String) {
+          send({
+            'type': 'error',
+            'code': 'unsupported_frame',
+            'message': 'Terminal input must be JSON text frames.',
+          });
+          return;
+        }
+        final message = _decodeTerminalMessage(event);
+        if (message == null) {
+          send({
+            'type': 'error',
+            'code': 'invalid_message',
+            'message': 'Terminal messages must be JSON objects.',
+          });
+          return;
+        }
+        switch (message['type']) {
+          case 'input':
+            final data = message['data'];
+            if (data is String && data.isNotEmpty) {
+              session.write(utf8.encode(data));
+            }
+            break;
+          case 'resize':
+            session.resize(
+              _clampTerminalValue(
+                  message['cols']?.toString(), columns, 20, 400),
+              _clampTerminalValue(message['rows']?.toString(), rows, 5, 200),
+            );
+            break;
+          case 'ping':
+            send({'type': 'pong'});
+            break;
+          default:
+            send({
+              'type': 'error',
+              'code': 'unknown_message',
+              'message': 'Unknown terminal message type.',
+            });
+        }
+      },
+      onDone: () {
+        session.close();
+        unawaited(finish());
+      },
+      onError: (Object _) {
+        session.close();
+        unawaited(finish());
+      },
+      cancelOnError: true,
+    );
+
+    send({
+      'type': 'ready',
+      'columns': columns,
+      'rows': rows,
+      'terminal': 'xterm-256color',
+    });
+  }
+
+  Map<String, dynamic>? _decodeTerminalMessage(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  int _clampTerminalValue(String? raw, int fallback, int min, int max) {
+    final value = int.tryParse(raw ?? '') ?? fallback;
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
   }
 
   Future<Map<String, dynamic>> _readJsonBody(HttpRequest request) async {
