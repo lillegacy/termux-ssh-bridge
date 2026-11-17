@@ -453,6 +453,20 @@ class GatewayApiServer {
       session = await terminalOpenCallback!(columns, rows);
     } catch (error) {
       _activeTerminals--;
+      // Explain the failure before closing; a close frame can only carry a
+      // short reason and the browser shows the JSON message instead.
+      try {
+        socket.add(
+          jsonEncode({
+            'type': 'error',
+            'code': error is GatewayApiException
+                ? error.code
+                : 'terminal_open_failed',
+            'message':
+                error is GatewayApiException ? error.message : error.toString(),
+          }),
+        );
+      } catch (_) {}
       await socket.close(
         WebSocketStatus.policyViolation,
         'Terminal could not be opened.',
